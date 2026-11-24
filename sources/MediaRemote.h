@@ -1,0 +1,18 @@
+// MediaRemote 私有框架里本插件用到的声明
+#import <Foundation/Foundation.h>
+
+void MRMediaRemoteRegisterForNowPlayingNotifications(dispatch_queue_t queue);
+void MRMediaRemoteGetNowPlayingInfo(dispatch_queue_t queue, void (^handler)(CFDictionaryRef info));
+void MRMediaRemoteGetNowPlayingApplicationIsPlaying(dispatch_queue_t queue, void (^handler)(Boolean playing));
+
+extern NSString *kMRMediaRemoteNowPlayingInfoDidChangeNotification;
+extern NSString *kMRMediaRemoteNowPlayingApplicationIsPlayingDidChangeNotification;
+
+extern CFStringRef kMRMediaRemoteNowPlayingInfoTitle;
+extern CFStringRef kMRMediaRemoteNowPlayingInfoArtist;
+extern CFStringRef kMRMediaRemoteNowPlayingInfoAlbum;
+extern CFStringRef kMRMediaRemoteNowPlayingInfoArtworkData;
+extern CFStringRef kMRMediaRemoteNowPlayingInfoDuration;
+extern CFStringRef kMRMediaRemoteNowPlayingInfoElapsedTime;
+extern CFStringRef kMRMediaRemoteNowPlayingInfoTimestamp;
+extern CFStringRef kMRMediaRemoteNowPlayingInfoPlaybackRate;
