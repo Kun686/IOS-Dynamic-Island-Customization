@@ -10,9 +10,12 @@
 @property (nonatomic) BOOL suspended;
 - (void)refresh;
 
-// 覆盖模式下，只有自定义胶囊可见时才接管对应触摸点。
-// 其他开孔区域交还给系统灵动岛处理。
+// 只有自定义胶囊可见时才接管对应触摸点。
+// 其他区域交还给系统灵动岛或下层窗口处理。
 - (BOOL)shouldHandleTouchAtPoint:(CGPoint)point;
+
+// HUD 窗口用它决定是否暂时关闭全局透传，让自定义胶囊接收长按和点按。
+- (BOOL)hasInteractiveIsland;
 
 // 该应用的通知是否由岛接管
 - (BOOL)shouldTakeBundle:(NSString *)bundleID;

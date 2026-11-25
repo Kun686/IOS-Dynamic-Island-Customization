@@ -121,6 +121,7 @@ static UIColor *IKColorFromHex(NSString *hex, UIColor *fallback) {
 
     UIColor *lime = [UIColor colorWithRed:0xB8 / 255.0 green:0xF3 / 255.0 blue:0x4A / 255.0 alpha:1];
     self.accent = IKColorFromHex(d[@"accent"], lime);
+    self.songTitleColor = IKColorFromHex(d[@"songTitleColor"], [UIColor colorWithWhite:1 alpha:0.66]);
     self.notifTitleColor = IKColorFromHex(d[@"notifTitleColor"], [UIColor whiteColor]);
     self.notifMessageColor = IKColorFromHex(d[@"notifMessageColor"], [UIColor colorWithWhite:1 alpha:0.66]);
 

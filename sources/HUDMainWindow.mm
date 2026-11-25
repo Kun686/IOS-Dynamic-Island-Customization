@@ -14,22 +14,19 @@
 
 + (BOOL)_isSystemWindow { return YES; }
 - (BOOL)_isWindowServerHostingManaged { return NO; }
-- (BOOL)_ignoresHitTest { return [HUDRootViewController passthroughMode]; }
+- (BOOL)_ignoresHitTest {
+    // 全局透传会让自定义胶囊连 UIGestureRecognizer 都收不到。
+    // 只有胶囊本身暂时关闭透传，其他位置仍在 hitTest 中返回 nil。
+    return [HUDRootViewController passthroughMode] && ![[IKController shared] hasInteractiveIsland];
+}
 - (BOOL)_isSecure { return YES; }
 - (BOOL)_shouldCreateContextAsSecure { return YES; }
 
 - (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
-    IKPrefs *prefs = [IKPrefs shared];
-    if (prefs.enabled && prefs.placement != 0) {
-        CGRect cutout = CGRectMake((self.bounds.size.width - prefs.cutoutWidth) / 2.0,
-                                   prefs.islandTop,
-                                   prefs.cutoutWidth,
-                                   prefs.cutoutHeight);
-        // 自定义胶囊覆盖开孔时优先接收自己的长按。胶囊隐藏或只覆盖开孔
-        // 的区域仍交还给 SpringBoard，避免遮断系统灵动岛的交互。
-        if (CGRectContainsPoint(CGRectInset(cutout, -6, -4), point)
-            && ![[IKController shared] shouldHandleTouchAtPoint:point]) return nil;
-    }
+    IKController *controller = [IKController shared];
+    // 窗口铺满屏幕，但只有可见的自定义胶囊可以成为触摸目标。
+    // 其他位置返回 nil，保持系统灵动岛和屏幕其他区域的事件路径。
+    if (![controller shouldHandleTouchAtPoint:point]) return nil;
     return [super hitTest:point withEvent:event];
 }
 

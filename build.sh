@@ -60,4 +60,11 @@ chmod 0644 Payload/TrollSpeed.app/Info.plist
 zip -qr TrollSpeed.tipa Payload
 cd - || exit
 mkdir -p packages
-mv TrollSpeed.xcarchive/Products/TrollSpeed.tipa packages/TrollSpeed+AppIntents16_$VERSION.tipa
+PACKAGE_NAME="TrollSpeed+AppIntents16_$VERSION"
+if [ -n "${IK_SUFFIX:-}" ]; then
+    case "$IK_SUFFIX" in
+        *[!A-Za-z0-9._-]*) echo "Error: IK_SUFFIX contains unsupported characters" >&2; exit 1 ;;
+    esac
+    PACKAGE_NAME="$PACKAGE_NAME-$IK_SUFFIX"
+fi
+mv TrollSpeed.xcarchive/Products/TrollSpeed.tipa "packages/$PACKAGE_NAME.tipa"

@@ -67,6 +67,53 @@ static id IKValue(id obj, NSString *key) {
     }
 }
 
+static NSString *IKPathShape(NSString *path) {
+    if (path.length == 0) return @"-";
+    NSMutableArray<NSString *> *parts = [NSMutableArray array];
+    for (NSString *part in path.pathComponents) {
+        if (part.length == 0 || [part isEqualToString:@"/"]) continue;
+        [parts addObject:part];
+        if (parts.count == 2) break;
+    }
+    return parts.count ? [parts componentsJoinedByString:@"/"] : @"-";
+}
+
+// 只记录值的形状和本地文件可读性，不记录通知正文、完整路径或图片内容。
+static NSString *IKValueShape(id value) {
+    if (!value || value == [NSNull null]) return @"empty";
+    if ([value isKindOfClass:[UIImage class]]) {
+        UIImage *image = value;
+        return [NSString stringWithFormat:@"image %.0fx%.0f", image.size.width, image.size.height];
+    }
+    if ([value isKindOfClass:[NSData class]]) {
+        return [NSString stringWithFormat:@"data.len=%lu", (unsigned long)[(NSData *)value length]];
+    }
+    if ([value isKindOfClass:[NSNumber class]]) {
+        return [NSString stringWithFormat:@"number=%@", [(NSNumber *)value boolValue] ? @"true" : @"false"];
+    }
+    NSURL *url = [value isKindOfClass:[NSURL class]] ? value : nil;
+    NSString *string = [value isKindOfClass:[NSString class]] ? value : nil;
+    if (string.length) {
+        NSURL *candidate = [NSURL URLWithString:string];
+        if (candidate.scheme.length) url = candidate;
+    }
+    if (url) {
+        NSString *path = url.path ?: @"";
+        BOOL readable = url.isFileURL && [[NSFileManager defaultManager] isReadableFileAtPath:path];
+        return [NSString stringWithFormat:@"url.scheme=%@ path=%@ ext=%@ readable=%d",
+                url.scheme ?: @"-", IKPathShape(path), path.pathExtension ?: @"-", readable];
+    }
+    if (string) {
+        NSString *expanded = [string stringByExpandingTildeInPath];
+        BOOL pathLike = [expanded hasPrefix:@"/"] || [expanded containsString:@"/"];
+        BOOL readable = pathLike && [[NSFileManager defaultManager] isReadableFileAtPath:expanded];
+        return [NSString stringWithFormat:@"string.len=%lu ext=%@%@",
+                (unsigned long)string.length, expanded.pathExtension ?: @"-",
+                pathLike ? [NSString stringWithFormat:@" path=%@ readable=%d", IKPathShape(expanded), readable] : @""];
+    }
+    return NSStringFromClass([value class]);
+}
+
 static UIImage *IKImageFromValueEnhanced(id value);
 
 static UIImage *IKImageFromNamedValue(NSString *name) {
@@ -180,6 +227,14 @@ static UIImage *IKFindImageEnhanced(id obj, NSInteger depth) {
     UIImage *direct = IKImageFromValueEnhanced(obj);
     if (direct) return direct;
 
+    if ([obj isKindOfClass:[NSArray class]]) {
+        for (id item in (NSArray *)obj) {
+            UIImage *found = IKFindImageEnhanced(item, depth + 1);
+            if (found) return found;
+        }
+        return nil;
+    }
+
     if ([obj isKindOfClass:[NSDictionary class]]) {
         for (id key in (NSDictionary *)obj) {
             NSString *name = [key isKindOfClass:[NSString class]] ? [key lowercaseString] : @"";
@@ -200,7 +255,10 @@ static UIImage *IKFindImageEnhanced(id obj, NSInteger depth) {
         @"contactImage", @"contactAvatar", @"photo", @"photoImage",
         @"thumbnail", @"icon", @"userInfo", @"userInfoDictionary",
         @"context", @"communicationContext", @"sender", @"contact", @"imageName",
-        @"fileURL", @"filePath", @"contentURL", @"data", @"imageData"
+        @"fileURL", @"filePath", @"contentURL", @"data", @"content",
+        @"modalAlertContent", @"starkBannerContent", @"accessoryImage",
+        @"accessoryIconMask", @"sectionIcon", @"primaryAttachment",
+        @"additionalAttachments", @"attachments", @"recipients"
     ];
     for (NSString *key in knownKeys) {
         UIImage *found = IKFindImageEnhanced(IKValue(obj, key), depth + 1);
@@ -310,7 +368,12 @@ static UIImage *IKFindImageEnhanced(id obj, NSInteger depth) {
         // 发送者头像（聊天类通知）。不同应用放的位置不一样，逐个地方找
         id context = IKValue(bulletin, @"communicationContext");
         id sender = IKValue(context, @"sender");
+        id content = IKValue(bulletin, @"content");
+        id modalContent = IKValue(bulletin, @"modalAlertContent");
+        id starkContent = IKValue(bulletin, @"starkBannerContent");
         id attachment = IKValue(bulletin, @"primaryAttachment");
+        id attachments = IKValue(bulletin, @"additionalAttachments");
+        id accessoryImage = IKValue(bulletin, @"accessoryImage");
         id icon = IKValue(bulletin, @"icon");
         NSString *imageName = IKString(context, @"imageName");
         NSString *sectionBundlePath = IKString(bulletin, @"sectionBundlePath");
@@ -332,22 +395,41 @@ static UIImage *IKFindImageEnhanced(id obj, NSInteger depth) {
         NSString *avatarFrom = @"-";
         @try {
             if ((avatar = IKFindImageEnhanced(sender, 0))) avatarFrom = @"sender";
+            else if ((avatar = IKFindImageEnhanced(context, 0))) avatarFrom = @"communicationContext";
             else if ((avatar = IKImageFromNamedValue(imageName))) avatarFrom = @"communicationContext.imageName";
             else if ((avatar = IKImageFromBundleName(imageName, sectionBundle))) avatarFrom = @"sectionBundle.imageName";
-            else if ((avatar = IKFindImageEnhanced(context, 0))) avatarFrom = @"communicationContext";
+            else if ((avatar = IKFindImageEnhanced(content, 0))) avatarFrom = @"content";
+            else if ((avatar = IKFindImageEnhanced(modalContent, 0))) avatarFrom = @"modalAlertContent";
+            else if ((avatar = IKFindImageEnhanced(starkContent, 0))) avatarFrom = @"starkBannerContent";
+            else if ((avatar = IKFindImageEnhanced(accessoryImage, 0))) avatarFrom = @"accessoryImage";
             else if ((avatar = IKFindImageEnhanced(attachment, 0))) avatarFrom = @"primaryAttachment";
+            else if ((avatar = IKFindImageEnhanced(attachments, 0))) avatarFrom = @"additionalAttachments";
+            else if ((avatar = IKFindImageEnhanced(icon, 0))) avatarFrom = @"icon";
             else if ((avatar = IKFindImageEnhanced(IKValue(bulletin, @"userInfo"), 0))) avatarFrom = @"userInfo";
         } @catch (__unused NSException *e) {}
-        IKNotifLog(@"头像：%@ from=%@ imageName.len=%lu bundle=%d", bundleID, avatarFrom,
-                   (unsigned long)imageName.length, sectionBundle != nil);
+        IKNotifLog(@"头像：%@ from=%@ imageName.len=%lu bundle=%d candidates=sender:%d context:%d content:%d attachment:%d accessory:%d icon:%d",
+                   bundleID, avatarFrom, (unsigned long)imageName.length, sectionBundle != nil,
+                   sender != nil, context != nil, content != nil, attachment != nil,
+                   accessoryImage != nil, icon != nil);
 
         // 第一次遇到这个应用时，把通知对象的结构记下来（只有属性名和类型，没有内容），方便定位头像在哪
         if (![self.dumpedSections containsObject:bundleID]) {
             [self.dumpedSections addObject:bundleID];
+            id contentURL = IKValue(context, @"contentURL") ?: IKValue(bulletin, @"contentURL");
+            id systemImage = IKValue(context, @"systemImage") ?: IKValue(bulletin, @"systemImage");
+            id contactIdentifier = IKValue(sender, @"cnContactIdentifier") ?: IKValue(context, @"cnContactIdentifier");
+            IKNotifLog(@"值形状 %@ imageName=%@ contentURL=%@ systemImage=%@ sender.cnContactIdentifier=%@ content=%@ accessoryImage=%@ attachment=%@ additionalAttachments=%@",
+                       bundleID, IKValueShape(imageName), IKValueShape(contentURL),
+                       IKValueShape(systemImage), IKValueShape(contactIdentifier),
+                       IKValueShape(content), IKValueShape(accessoryImage),
+                       IKValueShape(attachment), IKValueShape(attachments));
             IKNotifLog(@"结构 bulletin=%@", IKDescribeProperties(bulletin));
             IKNotifLog(@"结构 communicationContext=%@", IKDescribeProperties(context));
             IKNotifLog(@"结构 sender=%@", IKDescribeProperties(sender));
+            IKNotifLog(@"结构 content=%@", IKDescribeProperties(content));
             IKNotifLog(@"结构 primaryAttachment=%@", IKDescribeProperties(attachment));
+            IKNotifLog(@"结构 additionalAttachments=%@", IKDescribeProperties(attachments));
+            IKNotifLog(@"结构 accessoryImage=%@", IKDescribeProperties(accessoryImage));
             IKNotifLog(@"结构 icon=%@", IKDescribeProperties(icon));
         }
 

@@ -31,6 +31,9 @@ static void IKWindowPrefsChanged(CFNotificationCenterRef center, void *observer,
 @implementation HUDMainApplicationDelegate {
     HUDRootViewController *_rootViewController;
     SBSAccessibilityWindowHostingController *_windowHostingController;
+    unsigned int _registeredContextID;
+    double _registeredWindowLevel;
+    BOOL _hasRegisteredWindow;
 }
 
 - (instancetype)init
@@ -50,11 +53,12 @@ static void IKWindowPrefsChanged(CFNotificationCenterRef center, void *observer,
 
     self.window = [[HUDMainWindow alloc] initWithFrame:[[UIScreen mainScreen] bounds]];
     [self.window setRootViewController:_rootViewController];
-    
+    // 先设置 UIKit 层级，再让窗口可见，避免启动瞬间被系统灵动岛压在下面。
+    [self.window setWindowLevel:[IKPrefs windowLevelFromFile]];
+    _windowHostingController = [[objc_getClass("SBSAccessibilityWindowHostingController") alloc] init];
     [self.window setHidden:NO];
     [self.window makeKeyAndVisible];
 
-    _windowHostingController = [[objc_getClass("SBSAccessibilityWindowHostingController") alloc] init];
     CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), (__bridge void *)self,
                                     IKWindowPrefsChanged, CFSTR(IKPrefsChangedDarwin), NULL,
                                     CFNotificationSuspensionBehaviorDeliverImmediately);
@@ -83,15 +87,19 @@ static void IKWindowPrefsChanged(CFNotificationCenterRef center, void *observer,
         return;
     }
 
-    // 同一窗口上下文在部分系统版本上不会因重复 register 自动更新层级。
-    // 有注销接口时先注销再注册，没有接口时直接调用兼容的 register 方法。
+    // 设置页会在滑块拖动时连续发通知。相同上下文和层级已经登记成功时跳过，
+    // 只有真正改变层级或窗口上下文时才重新登记。
     SEL unregisterSelector = NSSelectorFromString(@"unregisterWindowWithContextID:");
-    if ([_windowHostingController respondsToSelector:unregisterSelector]) {
+    if (_hasRegisteredWindow && _registeredContextID == contextId
+        && fabs(_registeredWindowLevel - windowLevel) < 0.5) {
+        return;
+    }
+    if (_hasRegisteredWindow && [_windowHostingController respondsToSelector:unregisterSelector]) {
         NSMethodSignature *unregisterSignature = [NSMethodSignature signatureWithObjCTypes:"v@:I"];
         NSInvocation *unregisterInvocation = [NSInvocation invocationWithMethodSignature:unregisterSignature];
         [unregisterInvocation setTarget:_windowHostingController];
         [unregisterInvocation setSelector:unregisterSelector];
-        [unregisterInvocation setArgument:&contextId atIndex:2];
+        [unregisterInvocation setArgument:&_registeredContextID atIndex:2];
         [unregisterInvocation invoke];
     }
 
@@ -102,6 +110,9 @@ static void IKWindowPrefsChanged(CFNotificationCenterRef center, void *observer,
     [invocation setArgument:&contextId atIndex:2];
     [invocation setArgument:&windowLevel atIndex:3];
     [invocation invoke];
+    _registeredContextID = contextId;
+    _registeredWindowLevel = windowLevel;
+    _hasRegisteredWindow = YES;
 #pragma clang diagnostic pop
     [IKPrefs log:[NSString stringWithFormat:@"windowLevel applied=%.0f context=%u", windowLevel, contextId]];
 }

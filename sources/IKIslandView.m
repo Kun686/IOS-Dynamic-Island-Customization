@@ -56,35 +56,36 @@
 }
 
 - (void)setSpinning:(BOOL)spinning period:(double)seconds {
-    BOOL periodChanged = fabs(seconds - self.period) > 0.01;
+    BOOL changed = self.spinning != spinning || fabs(seconds - self.period) > 0.01;
     self.spinning = spinning;
-    self.period = seconds;
-    if (periodChanged) [self.disc.layer removeAnimationForKey:@"ik.spin"];
-    [self applySpin];
+    self.period = MAX(0.1, seconds);
+    if (changed) [self applySpin];
+}
+
+- (CGFloat)currentRotation {
+    CALayer *layer = self.disc.layer;
+    CALayer *presentation = layer.presentationLayer;
+    CATransform3D transform = presentation ? presentation.transform : layer.transform;
+    return atan2(transform.m12, transform.m11);
 }
 
 - (void)applySpin {
     CALayer *layer = self.disc.layer;
-    if (![layer animationForKey:@"ik.spin"]) {
-        // 先恢复时间线再加动画，否则暂停状态下新动画不会走
-        layer.speed = 1; layer.timeOffset = 0; layer.beginTime = 0;
-        CABasicAnimation *a = [CABasicAnimation animationWithKeyPath:@"transform.rotation.z"];
-        a.fromValue = @0;
-        a.toValue = @(M_PI * 2);
-        a.duration = self.period;
-        a.repeatCount = HUGE_VALF;
-        a.removedOnCompletion = NO;
-        [layer addAnimation:a forKey:@"ik.spin"];
-    }
-    BOOL paused = (layer.speed == 0);
-    if (self.spinning && paused) {
-        CFTimeInterval pausedAt = layer.timeOffset;
-        layer.speed = 1; layer.timeOffset = 0; layer.beginTime = 0;
-        layer.beginTime = [layer convertTime:CACurrentMediaTime() fromLayer:nil] - pausedAt;
-    } else if (!self.spinning && !paused) {
-        CFTimeInterval t = [layer convertTime:CACurrentMediaTime() fromLayer:nil];
-        layer.speed = 0;
-        layer.timeOffset = t;
+    CGFloat rotation = [self currentRotation];
+    [layer removeAnimationForKey:@"ik.spin"];
+    layer.speed = 1;
+    layer.timeOffset = 0;
+    layer.beginTime = 0;
+    layer.transform = CATransform3DMakeRotation(rotation, 0, 0, 1);
+
+    if (self.spinning && self.window) {
+        CABasicAnimation *animation = [CABasicAnimation animationWithKeyPath:@"transform.rotation.z"];
+        animation.fromValue = @(rotation);
+        animation.toValue = @(rotation + M_PI * 2);
+        animation.duration = self.period;
+        animation.repeatCount = HUGE_VALF;
+        animation.removedOnCompletion = NO;
+        [layer addAnimation:animation forKey:@"ik.spin"];
     }
 }
 
@@ -166,6 +167,8 @@
 @property (nonatomic, strong) UILabel *appLabel;
 @property (nonatomic, strong) UILabel *label1;
 @property (nonatomic, strong) UILabel *label2;
+@property (nonatomic, strong) UIView *label1Viewport;
+@property (nonatomic, strong) UIView *label2Viewport;
 @property (nonatomic) BOOL iconRound;
 @property (nonatomic, strong) UILabel *label1H;      // 当前行的高亮层，叠在 label1 上
 @property (nonatomic, strong) UILabel *label2H;      // 双行模式下当前歌词的高亮层
@@ -174,6 +177,13 @@
 @property (nonatomic) double sweepDuration;
 @property (nonatomic) double sweepPausedFraction;
 @property (nonatomic) BOOL sweepPlaying;
+@property (nonatomic) CGFloat label1Offset;
+@property (nonatomic) CGFloat label2Offset;
+@property (nonatomic) CGFloat label1TextWidth;
+@property (nonatomic) CGFloat label2TextWidth;
+@property (nonatomic) BOOL sweepConfigured;
+@property (nonatomic) double configuredSweepStart;
+@property (nonatomic) BOOL configuredSweepPlaying;
 @property (nonatomic, strong) CAShapeLayer *ringTrack;
 @property (nonatomic, strong) CAShapeLayer *ring;
 @end
@@ -203,25 +213,31 @@
 
         _label1 = [UILabel new];
         _label1.font = [UIFont systemFontOfSize:16 weight:UIFontWeightBold];
-        _label1.lineBreakMode = NSLineBreakByTruncatingTail;
+        _label1.lineBreakMode = NSLineBreakByClipping;
 
         _label2 = [UILabel new];
         _label2.font = [UIFont systemFontOfSize:13 weight:UIFontWeightRegular];
         _label2.textColor = [UIColor colorWithWhite:0.66 alpha:1];
-        _label2.lineBreakMode = NSLineBreakByTruncatingTail;
+        _label2.lineBreakMode = NSLineBreakByClipping;
 
-        for (UIView *v in @[_cover, _barsView, _iconView, _appLabel, _label1, _label2]) [self addSubview:v];
+        _label1Viewport = [UIView new];
+        _label1Viewport.clipsToBounds = YES;
+        _label2Viewport = [UIView new];
+        _label2Viewport.clipsToBounds = YES;
+        for (UIView *v in @[_cover, _barsView, _iconView, _appLabel, _label1Viewport, _label2Viewport]) [self addSubview:v];
 
         _label1H = [UILabel new];
         _label1H.font = _label1.font;
-        _label1H.lineBreakMode = NSLineBreakByTruncatingTail;
+        _label1H.lineBreakMode = NSLineBreakByClipping;
         _label1H.hidden = YES;
-        [self addSubview:_label1H];
+        [_label1Viewport addSubview:_label1];
+        [_label1Viewport addSubview:_label1H];
         _label2H = [UILabel new];
         _label2H.font = _label2.font;
-        _label2H.lineBreakMode = NSLineBreakByTruncatingTail;
+        _label2H.lineBreakMode = NSLineBreakByClipping;
         _label2H.hidden = YES;
-        [self addSubview:_label2H];
+        [_label2Viewport addSubview:_label2];
+        [_label2Viewport addSubview:_label2H];
         _lyricEffect = 1;
         _lyricFontSize = 16;
 
@@ -253,11 +269,12 @@
 - (void)applyColors {
     BOOL notif = (self.state == IKStateNotif);
     UIColor *lyric = self.lyricColor ?: self.accent;
+    UIColor *songTitle = self.songTitleColor ?: [UIColor colorWithWhite:1 alpha:0.66];
     UIColor *notifTitle = self.notifTitleColor ?: [UIColor whiteColor];
     UIColor *notifMessage = self.notifMessageColor ?: [UIColor colorWithWhite:1 alpha:0.66];
     // 双行时第一行是歌名，第二行是当前歌词。高亮层只覆盖当前歌词。
     self.label1.textColor = notif ? notifTitle
-                                  : (self.lyricLines >= 2 ? [UIColor colorWithWhite:1 alpha:0.66]
+                                  : (self.lyricLines >= 2 ? songTitle
                                                           : [UIColor colorWithWhite:1 alpha:0.5]);
     self.label2.textColor = notif ? notifMessage
                                   : [UIColor colorWithWhite:1 alpha:0.5];
@@ -268,6 +285,7 @@
 }
 
 - (void)setLyricColor:(UIColor *)lyricColor { _lyricColor = lyricColor; [self applyColors]; }
+- (void)setSongTitleColor:(UIColor *)songTitleColor { _songTitleColor = songTitleColor; [self applyColors]; }
 - (void)setRingColor:(UIColor *)ringColor { _ringColor = ringColor; [self applyColors]; }
 - (void)setNotifTitleColor:(UIColor *)color { _notifTitleColor = color; [self applyColors]; }
 - (void)setNotifMessageColor:(UIColor *)color { _notifMessageColor = color; [self applyColors]; }
@@ -317,6 +335,13 @@
     self.label1H.text = l1;
     self.label2.text = l2;
     self.label2H.text = l2;
+    self.label1Offset = 0;
+    self.label2Offset = 0;
+    self.sweepConfigured = NO;
+    [self.label1.layer removeAnimationForKey:@"ik.lyricScroll"];
+    [self.label1H.layer removeAnimationForKey:@"ik.lyricScroll"];
+    [self.label2.layer removeAnimationForKey:@"ik.lyricScroll"];
+    [self.label2H.layer removeAnimationForKey:@"ik.lyricScroll"];
     self.sweepDuration = 0; // 没有时间信息：整行高亮
     [self applySweep];
 }
@@ -340,6 +365,13 @@
             v.clipsToBounds = YES;
             [v.layer addAnimation:t forKey:@"ik.line"];
         }
+        self.label1Offset = 0;
+        self.label2Offset = 0;
+        self.sweepConfigured = NO;
+        [self.label1.layer removeAnimationForKey:@"ik.lyricScroll"];
+        [self.label1H.layer removeAnimationForKey:@"ik.lyricScroll"];
+        [self.label2.layer removeAnimationForKey:@"ik.lyricScroll"];
+        [self.label2H.layer removeAnimationForKey:@"ik.lyricScroll"];
     }
     if (two) {
         self.label1.text = next;
@@ -360,48 +392,124 @@
     [self applySweep];
 }
 
-// 当前行从左到右填色：用一个宽度随时间增长的遮罩盖在高亮层上
+// 当前行从左到右填色，同时让过长歌词沿填色进度平滑左移。
+- (CGFloat)textWidthForLabel:(UILabel *)label {
+    if (label.text.length == 0 || label.font == nil) return 0;
+    CGRect bounds = [label.text boundingRectWithSize:CGSizeMake(CGFLOAT_MAX, label.font.lineHeight)
+                                             options:NSStringDrawingUsesLineFragmentOrigin | NSStringDrawingUsesFontLeading
+                                          attributes:@{NSFontAttributeName: label.font}
+                                             context:nil];
+    return ceil(CGRectGetWidth(bounds)) + 2;
+}
+
+- (CGFloat)presentationOffsetForLabel:(UILabel *)label fallback:(CGFloat)fallback {
+    CALayer *presentation = label.layer.presentationLayer;
+    return presentation ? presentation.frame.origin.x : fallback;
+}
+
+- (void)setTrackOffset:(CGFloat)offset label:(UILabel *)label highlight:(UILabel *)highlight {
+    CGRect frame = label.frame;
+    frame.origin.x = offset;
+    label.frame = frame;
+    frame = highlight.frame;
+    frame.origin.x = offset;
+    highlight.frame = frame;
+}
+
+- (void)removeLyricScrollAnimations {
+    for (UIView *view in @[self.label1, self.label1H, self.label2, self.label2H]) {
+        [view.layer removeAnimationForKey:@"ik.lyricScroll"];
+    }
+}
+
 - (void)applySweep {
     UILabel *highlight = self.lyricLines >= 2 ? self.label2H : self.label1H;
+    UILabel *track = self.lyricLines >= 2 ? self.label2 : self.label1;
+    UIView *viewport = self.lyricLines >= 2 ? self.label2Viewport : self.label1Viewport;
     CALayer *host = highlight.layer;
-    self.label1H.layer.mask = nil;
-    self.label2H.layer.mask = nil;
-    if (self.lyricEffect != 1 || self.sweepDuration <= 0 || highlight.hidden) {
+    BOOL canSweep = self.lyricEffect == 1 && self.sweepDuration > 0 && !highlight.hidden
+        && viewport.bounds.size.width > 0;
+
+    if (!canSweep) {
+        self.label1H.layer.mask = nil;
+        self.label2H.layer.mask = nil;
+        [self removeLyricScrollAnimations];
+        self.label1Offset = 0;
+        self.label2Offset = 0;
+        [self setTrackOffset:0 label:self.label1 highlight:self.label1H];
+        [self setTrackOffset:0 label:self.label2 highlight:self.label2H];
+        self.sweepConfigured = NO;
         return;
     }
+
     CGFloat h = highlight.bounds.size.height;
-    CGFloat textW = [highlight.text ?: @"" sizeWithAttributes:@{NSFontAttributeName: highlight.font}].width + 2;
-    CGFloat full = MIN(highlight.bounds.size.width, textW);
-    if (full <= 0 || h <= 0) { host.mask = nil; return; }
+    CGFloat textW = [self textWidthForLabel:highlight];
+    CGFloat full = MAX(0, textW);
+    if (full <= 0 || h <= 0) {
+        host.mask = nil;
+        return;
+    }
 
     double frac = self.sweepPlaying
         ? MAX(0, MIN(1, (CACurrentMediaTime() - self.sweepStart) / self.sweepDuration))
         : self.sweepPausedFraction;
+    CGFloat overflow = MAX(0, textW - viewport.bounds.size.width);
+    CGFloat targetOffset = -overflow * frac;
+    BOOL sameSweep = self.sweepConfigured
+        && self.configuredSweepPlaying == self.sweepPlaying
+        && fabs(self.configuredSweepStart - self.sweepStart) < 0.05
+        && host.mask != nil;
 
     if (!self.sweepMask) {
         self.sweepMask = [CALayer layer];
         self.sweepMask.backgroundColor = [UIColor blackColor].CGColor;
         self.sweepMask.anchorPoint = CGPointZero;
     }
-    CALayer *m = self.sweepMask;
-    [CATransaction begin];
-    [CATransaction setDisableActions:YES];
-    [m removeAllAnimations];
-    m.position = CGPointZero;
-    m.bounds = CGRectMake(0, 0, full, h);
-    m.transform = CATransform3DMakeScale(frac, 1, 1);
-    host.mask = m;
-    [CATransaction commit];
+    CALayer *mask = self.sweepMask;
+    if (!sameSweep) {
+        [self removeLyricScrollAnimations];
+        self.label1H.layer.mask = nil;
+        self.label2H.layer.mask = nil;
+        CGFloat currentOffset = [self presentationOffsetForLabel:track
+                                                             fallback:(self.lyricLines >= 2 ? self.label2Offset : self.label1Offset)];
+        [self setTrackOffset:currentOffset label:track highlight:highlight];
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        [mask removeAllAnimations];
+        mask.position = CGPointZero;
+        mask.bounds = CGRectMake(0, 0, full, h);
+        mask.transform = CATransform3DMakeScale(frac, 1, 1);
+        host.mask = mask;
+        [CATransaction commit];
 
-    if (self.sweepPlaying && frac < 1) {
-        CABasicAnimation *a = [CABasicAnimation animationWithKeyPath:@"transform.scale.x"];
-        a.fromValue = @(frac);
-        a.toValue = @1.0;
-        a.duration = self.sweepDuration * (1 - frac);
-        a.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionLinear];
-        a.fillMode = kCAFillModeForwards;
-        a.removedOnCompletion = NO;
-        [m addAnimation:a forKey:@"ik.sweep"];
+        if (self.sweepPlaying && frac < 1) {
+            CABasicAnimation *fill = [CABasicAnimation animationWithKeyPath:@"transform.scale.x"];
+            fill.fromValue = @(frac);
+            fill.toValue = @1.0;
+            fill.duration = self.sweepDuration * (1 - frac);
+            fill.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionLinear];
+            fill.fillMode = kCAFillModeForwards;
+            fill.removedOnCompletion = NO;
+            [mask addAnimation:fill forKey:@"ik.sweep"];
+
+            CGFloat *storedOffset = self.lyricLines >= 2 ? &_label2Offset : &_label1Offset;
+            *storedOffset = targetOffset;
+            NSTimeInterval remaining = MAX(0.05, self.sweepDuration * (1 - frac));
+            [UIView animateWithDuration:remaining delay:0
+                                options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionCurveLinear | UIViewAnimationOptionAllowUserInteraction
+                             animations:^{
+                [self setTrackOffset:targetOffset label:track highlight:highlight];
+            } completion:nil];
+        } else {
+            if (self.lyricLines >= 2) self.label2Offset = targetOffset;
+            else self.label1Offset = targetOffset;
+            [self setTrackOffset:targetOffset label:track highlight:highlight];
+        }
+        self.configuredSweepStart = self.sweepStart;
+        self.configuredSweepPlaying = self.sweepPlaying;
+        self.sweepConfigured = YES;
+    } else {
+        host.mask = mask;
     }
 }
 
@@ -490,6 +598,22 @@
     [self.layer addAnimation:pulse forKey:@"ik.interactionPulse"];
 }
 
+- (void)layoutTextViewport:(UIView *)viewport label:(UILabel *)label highlight:(UILabel *)highlight
+                     frame:(CGRect)frame hidden:(BOOL)hidden notification:(BOOL)notification offset:(CGFloat)offset {
+    viewport.frame = frame;
+    viewport.hidden = hidden;
+    label.numberOfLines = 1;
+    highlight.numberOfLines = 1;
+    label.lineBreakMode = notification ? NSLineBreakByTruncatingTail : NSLineBreakByClipping;
+    highlight.lineBreakMode = NSLineBreakByClipping;
+
+    CGFloat textWidth = [self textWidthForLabel:label];
+    CGFloat trackWidth = notification ? MAX(0, frame.size.width) : MAX(frame.size.width, textWidth);
+    CGRect trackFrame = CGRectMake(offset, 0, trackWidth, frame.size.height);
+    label.frame = trackFrame;
+    highlight.frame = trackFrame;
+}
+
 - (void)layoutSubviews {
     [super layoutSubviews];
     CGFloat W = self.bounds.size.width, H = self.bounds.size.height;
@@ -506,6 +630,10 @@
     self.appLabel.hidden = !notif;
     self.label1.hidden   = !(lyric || notif);
     self.label2.hidden   = !two;
+    self.label1H.hidden  = self.label1.hidden || notif || self.sweepDuration <= 0
+        || (lyric && self.lyricLines >= 2);
+    self.label2H.hidden  = self.label2.hidden || notif || self.sweepDuration <= 0
+        || !(lyric && self.lyricLines >= 2);
 
     [self layoutRingWithCornerRadius:(self.coversCutout ? MIN(H / 2, 36) : MIN(H / 2, 29))];
 
@@ -515,28 +643,37 @@
         if (compact) {
             self.cover.frame = CGRectMake(4, (H - 26) / 2, 26, 26);
             self.barsView.frame = CGRectMake(W - 12 - 18, (H - 16) / 2, 18, 16);
+            [self layoutTextViewport:self.label1Viewport label:self.label1 highlight:self.label1H
+                               frame:CGRectZero hidden:YES notification:NO offset:0];
+            [self layoutTextViewport:self.label2Viewport label:self.label2 highlight:self.label2H
+                               frame:CGRectZero hidden:YES notification:NO offset:0];
         } else if (lyric) {
             CGFloat c = H - 12;
             self.cover.frame = CGRectMake(6, 6, c, c);
             self.barsView.frame = CGRectMake(W - 16 - 18, (H - 16) / 2, 18, 16);
             CGFloat x = 6 + c + 10, w = W - x - 16 - 18 - 10;
-            if (two) {
-                self.label1.frame = CGRectMake(x, H / 2 - 21, w, 22);
-                self.label2.frame = CGRectMake(x, H / 2 + 2, w, 18);
-            } else {
-                self.label1.frame = CGRectMake(x, (H - 22) / 2, w, 22);
-            }
+            [self layoutTextViewport:self.label1Viewport label:self.label1 highlight:self.label1H
+                               frame:(two ? CGRectMake(x, H / 2 - 21, w, 22) : CGRectMake(x, (H - 22) / 2, w, 22))
+                              hidden:NO notification:NO offset:self.label1Offset];
+            [self layoutTextViewport:self.label2Viewport label:self.label2 highlight:self.label2H
+                               frame:(two ? CGRectMake(x, H / 2 + 2, w, 18) : CGRectZero)
+                              hidden:!two notification:NO offset:self.label2Offset];
         } else if (notif) {
             self.iconView.frame = CGRectMake(8, (H - 42) / 2, 42, 42);
             CGFloat x = 60, w = W - x - 18;
             self.appLabel.frame = CGRectMake(W - 18 - 96, H / 2 - 19, 96, 16);
-            self.label1.frame = CGRectMake(x, H / 2 - 21, w - 102, 22);
-            self.label2.frame = CGRectMake(x, H / 2 + 2, w, 18);
+            [self layoutTextViewport:self.label1Viewport label:self.label1 highlight:self.label1H
+                               frame:CGRectMake(x, H / 2 - 21, MAX(0, w - 102), 22)
+                              hidden:NO notification:YES offset:0];
+            [self layoutTextViewport:self.label2Viewport label:self.label2 highlight:self.label2H
+                               frame:CGRectMake(x, H / 2 + 2, MAX(0, w), 18)
+                              hidden:NO notification:YES offset:0];
+        } else {
+            [self layoutTextViewport:self.label1Viewport label:self.label1 highlight:self.label1H
+                               frame:CGRectZero hidden:YES notification:NO offset:0];
+            [self layoutTextViewport:self.label2Viewport label:self.label2 highlight:self.label2H
+                               frame:CGRectZero hidden:YES notification:NO offset:0];
         }
-        self.label1H.frame = self.label1.frame;
-        self.label1H.hidden = self.label1.hidden || notif;
-        self.label2H.frame = self.label2.frame;
-        self.label2H.hidden = self.label2.hidden || notif;
         self.iconView.layer.cornerRadius = self.iconRound ? self.iconView.bounds.size.width / 2 : 11;
         [self applySweep];
         return;
@@ -550,19 +687,30 @@
     } else if (lyric) {
         self.cover.frame = CGRectMake(12, (H - 52) / 2, 52, 52);
         self.barsView.frame = CGRectMake(W - 20 - 18, (band - 16) / 2, 18, 16);
-        self.label1.frame = CGRectMake(76, band + 6, W - 76 - 18, 22);
-        self.label2.frame = CGRectMake(76, band + 28, W - 76 - 18, 18);
+        CGFloat textWidth = MAX(0, W - 76 - 18);
+        [self layoutTextViewport:self.label1Viewport label:self.label1 highlight:self.label1H
+                           frame:(self.lyricLines >= 2 ? CGRectMake(76, band + 6, textWidth, 22) : CGRectMake(76, band + 17, textWidth, 22))
+                          hidden:NO notification:NO offset:self.label1Offset];
+        [self layoutTextViewport:self.label2Viewport label:self.label2 highlight:self.label2H
+                           frame:(self.lyricLines >= 2 ? CGRectMake(76, band + 28, textWidth, 18) : CGRectZero)
+                          hidden:self.lyricLines < 2 notification:NO offset:self.label2Offset];
     } else if (notif) {
         self.iconView.frame = CGRectMake(14, (H - 44) / 2, 44, 44);
         CGFloat ax = W / 2 + self.cutoutWidth / 2 + 6;
         self.appLabel.frame = CGRectMake(ax, (band - 16) / 2, MAX(0, W - ax - 16), 16);
-        self.label1.frame = CGRectMake(70, band + 6, W - 70 - 18, 22);
-        self.label2.frame = CGRectMake(70, band + 28, W - 70 - 18, 18);
+        CGFloat textWidth = MAX(0, W - 70 - 18);
+        [self layoutTextViewport:self.label1Viewport label:self.label1 highlight:self.label1H
+                           frame:CGRectMake(70, band + 6, textWidth, 22)
+                          hidden:NO notification:YES offset:0];
+        [self layoutTextViewport:self.label2Viewport label:self.label2 highlight:self.label2H
+                           frame:CGRectMake(70, band + 28, textWidth, 18)
+                          hidden:NO notification:YES offset:0];
+    } else {
+        [self layoutTextViewport:self.label1Viewport label:self.label1 highlight:self.label1H
+                           frame:CGRectZero hidden:YES notification:NO offset:0];
+        [self layoutTextViewport:self.label2Viewport label:self.label2 highlight:self.label2H
+                           frame:CGRectZero hidden:YES notification:NO offset:0];
     }
-    self.label1H.frame = self.label1.frame;
-    self.label1H.hidden = self.label1.hidden || notif;
-    self.label2H.frame = self.label2.frame;
-    self.label2H.hidden = self.label2.hidden || notif;
     self.iconView.layer.cornerRadius = self.iconRound ? self.iconView.bounds.size.width / 2 : 11;
     [self applySweep];
 }

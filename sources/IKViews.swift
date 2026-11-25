@@ -262,7 +262,7 @@ struct NotifyView: View {
             .background(Color.ikCard)
             .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
 
-            Caption("系统横幅无法由本应用关闭。想只看岛上的显示，请到 系统设置 → 通知 里把对应应用的“横幅”关掉。覆盖模式下长按系统岛区域会交还给系统处理。")
+            Caption("系统横幅无法由本应用关闭。想只看岛上的显示，请到 系统设置 → 通知 里把对应应用的“横幅”关掉。覆盖模式下长按自定义胶囊可在歌词态和紧凑态之间切换。")
         }
         .task {
             let list = await Task.detached { AppList.load() }.value
@@ -305,6 +305,11 @@ struct LyricView: View {
                     Text("\(Int(store.s.lyricFontSize))").font(.system(size: 13))
                 }
                 Slider(value: $store.s.lyricFontSize, in: 13...18, step: 1) { Text("字号") }
+                    .frame(minHeight: 44)
+                ColorPicker("歌名颜色", selection: Binding(
+                    get: { Color(hex: store.s.songTitleColor) },
+                    set: { store.s.songTitleColor = $0.hexString }), supportsOpacity: false)
+                    .font(.system(size: 15))
                     .frame(minHeight: 44)
                 ColorModeRow(title: "歌词颜色", mode: $store.s.lyricColorMode, hex: $store.s.lyricColor, accent: accent)
             }
@@ -396,13 +401,13 @@ struct AppearanceView: View {
                 Segmented(value: $store.s.placement, options: [(0, "系统岛下方"), (1, "覆盖系统岛")], accent: accent)
                 Caption(store.s.placement == 0
                         ? "系统岛照常显示，歌词和通知挂在它下面，不遮挡状态栏时间。"
-                        : "盖在系统岛上，位置和大小按机型自动识别，并自动使用最高悬浮窗层级。长按自定义胶囊可切换歌词和紧凑态。")
+                        : "盖在系统岛上，位置和大小按机型自动识别。长按自定义胶囊可切换歌词和紧凑态，通知使用完整卡片显示。")
             }
 
             Card {
                 Caption("悬浮窗层级（实验）")
-                Segmented(value: $store.s.windowLevelBoost, options: [(0, "默认"), (1, "更高"), (2, "最高")], accent: accent)
-                Caption("覆盖模式默认使用最高层级。切换后会即时重新注册窗口，不需要重启悬浮窗。")
+                Segmented(value: $store.s.windowLevelBoost, options: [(0, "自动"), (1, "更高"), (2, "最高")], accent: accent)
+                Caption("覆盖模式的“自动”会使用系统可用的最高层级。切换后只在层级真正变化时重新登记窗口。")
             }
 
             Card {
@@ -424,6 +429,13 @@ struct AboutView: View {
     @State private var copied = false
     private let wechat = "-6-6-6666"
 
+    private var buildLabel: String {
+        let info = Bundle.main.infoDictionary
+        let version = info?["CFBundleShortVersionString"] as? String ?? "2.0"
+        let build = info?["CFBundleVersion"] as? String ?? "13"
+        return "\(version) (\(build))"
+    }
+
     var body: some View {
         Page(title: "关于") {
             Card {
@@ -432,6 +444,7 @@ struct AboutView: View {
                 Text("灵动岛美化的作者。使用中遇到问题或有新想法，欢迎通过微信联系。")
                     .font(.system(size: 15))
                     .fixedSize(horizontal: false, vertical: true)
+                Caption("版本 \(buildLabel)")
             }
 
             Card {

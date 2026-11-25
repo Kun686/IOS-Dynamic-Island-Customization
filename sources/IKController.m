@@ -19,9 +19,9 @@
 @property (nonatomic, copy) NSString *notifMessage;
 
 @property (nonatomic) BOOL userCollapsed;               // 用户点了一下，把歌词态收成紧凑态
-@property (nonatomic) BOOL longPressHandled;
 @property (nonatomic) CFAbsoluteTime pauseGraceUntil;   // 暂停后再显示几秒
 @property (nonatomic) BOOL wasPlaying;
+@property (nonatomic) NSUInteger transitionToken;
 
 // 歌词直接来自系统“正在播放”信息：有的播放器会把当前这句歌词写进标题、歌手或专辑字段。
 // 同一首歌（时长不变）期间哪个字段在变，哪个就是歌词
@@ -317,11 +317,9 @@ static BOOL IKSame(NSString *a, NSString *b) {
 
 - (void)longPressed:(UILongPressGestureRecognizer *)gesture {
     if (gesture.state == UIGestureRecognizerStateEnded || gesture.state == UIGestureRecognizerStateCancelled || gesture.state == UIGestureRecognizerStateFailed) {
-        self.longPressHandled = NO;
         return;
     }
-    if (gesture.state != UIGestureRecognizerStateBegan || self.longPressHandled) return;
-    self.longPressHandled = YES;
+    if (gesture.state != UIGestureRecognizerStateBegan) return;
 
     BOOL handled = NO;
     if (self.notifActive) {
@@ -359,9 +357,16 @@ static BOOL IKSame(NSString *a, NSString *b) {
 - (BOOL)shouldHandleTouchAtPoint:(CGPoint)point {
     if (!self.island || self.island.hidden || self.island.alpha < 0.01 || !self.container) return NO;
 
-    CGPoint localPoint = [self.container convertPoint:point fromView:self.container.window];
+    UIWindow *window = self.container.window;
+    if (!window) return NO;
+    CGPoint localPoint = [self.container convertPoint:point fromView:window];
     CGRect islandFrame = [self.island convertRect:self.island.bounds toView:self.container];
     return CGRectContainsPoint(CGRectInset(islandFrame, -8, -8), localPoint);
+}
+
+- (BOOL)hasInteractiveIsland {
+    return self.island && !self.island.hidden && self.island.alpha >= 0.01
+        && self.island.userInteractionEnabled;
 }
 
 - (CGRect)frameForState:(IKState)state musicOn:(BOOL)musicOn {
@@ -382,15 +387,18 @@ static BOOL IKSame(NSString *a, NSString *b) {
         return CGRectMake((sw - w) / 2, y, w, h);
     }
 
-    // 覆盖模式：盖在开孔上
-    CGFloat wide = MIN(sw - 50, 340);
+    // 覆盖模式：没有系统布局监视器时，按 430 宽机型系统岛的最大横向范围留出安全宽度。
+    // 宽度宁可稍大，也不能让系统岛从黑色胶囊两端露出来。
+    CGFloat fallbackIslandWidth = MAX(p.cutoutWidth + 2, sw - 73.33);
+    CGFloat compactWide = MIN(sw - 20, fallbackIslandWidth + 3);
+    CGFloat wide = MIN(sw - 20, fallbackIslandWidth + 21);
     // 比开孔四周各大 1pt，避免露出系统岛的边
     CGFloat ch = p.cutoutHeight + 2, top = p.islandTop - 1;
     CGFloat w = p.cutoutWidth + 2, h = ch;
     switch (state) {
-        case IKStateMusicCompact: w = p.cutoutWidth + 120; break;
+        case IKStateMusicCompact: w = compactWide; break;
         case IKStateLyric:        w = wide; h = ch + ((p.lyricLines >= 2) ? 55 : 39); break;
-        case IKStateNotif:        w = musicOn ? MIN(wide, 300) : wide; h = ch + 55; break;
+        case IKStateNotif:        w = wide; h = ch + 55; break;
         default: break;
     }
     return CGRectMake((sw - w) / 2, top, w, h);
@@ -400,6 +408,8 @@ static BOOL IKSame(NSString *a, NSString *b) {
     if (!self.island) return;
     IKPrefs *p = [IKPrefs shared];
     IKMusicCenter *m = [IKMusicCenter shared];
+    CGSize screenSize = self.container ? self.container.bounds.size : [UIScreen mainScreen].bounds.size;
+    CGFloat screenWidth = MIN(screenSize.width, screenSize.height);
 
     BOOL usable = p.enabled && !self.suspended && [self isPortrait];
     BOOL musicOn = usable && (p.lyricEnabled || p.spinEnabled) && m.hasTrack
@@ -424,6 +434,7 @@ static BOOL IKSame(NSString *a, NSString *b) {
         self.artworkColor = [self dominantColorOfImage:m.artwork];
     }
     self.island.lyricColor = [self colorForMode:p.lyricColorMode custom:p.lyricColor];
+    self.island.songTitleColor = p.songTitleColor;
     self.island.ringColor = [self colorForMode:p.ringColorMode custom:p.ringColor];
     self.island.notifTitleColor = p.notifTitleColor;
     self.island.notifMessageColor = p.notifMessageColor;
@@ -447,9 +458,10 @@ static BOOL IKSame(NSString *a, NSString *b) {
 
     // 形变动画
     CGRect frame = [self frameForState:target musicOn:musicOn];
-    // 下挂模式里系统岛自己还在显示音乐，不需要旁边的小封面
-    BOOL showMini = (target == IKStateNotif) && musicOn && (p.placement != 0);
-    CGRect mini = CGRectMake(CGRectGetMaxX(frame) + 6, p.islandTop, p.cutoutHeight, p.cutoutHeight);
+    // 通知使用完整卡片承载内容，避免音乐通知时额外的小胶囊被挤出屏幕边缘。
+    BOOL showMini = NO;
+    CGFloat miniSize = MAX(0, p.cutoutHeight);
+    CGRect mini = CGRectMake(MAX(0, (screenWidth - miniSize) / 2), p.islandTop, miniSize, miniSize);
     self.miniHolder.layer.cornerRadius = 18.5;
     self.miniCover.frame = CGRectMake(5, 5, 27, 27);
     if (self.miniHolder.alpha == 0) self.miniHolder.frame = mini;
@@ -457,6 +469,10 @@ static BOOL IKSame(NSString *a, NSString *b) {
     CGRect tucked = [self frameForState:IKStateHidden musicOn:NO]; // 缩在系统岛背后的位置
     if (p.placement != 0) tucked.origin.y = p.islandTop - 1;
     IKState previous = self.shownState;
+    BOOL geometryChanged = previous != target
+        || !CGRectEqualToRect(self.island.frame, frame)
+        || (target != IKStateHidden && self.island.alpha < 0.99);
+    NSUInteger transitionToken = ++self.transitionToken;
     self.shownState = target;
 
     void (^settle)(void) = ^{
@@ -524,6 +540,7 @@ static BOOL IKSame(NSString *a, NSString *b) {
                 self.island.transform = CGAffineTransformMakeScale(0.7, 0.7);
             } else {
                 self.island.frame = tucked;
+                self.island.alpha = 0;
                 [self.island layoutIfNeeded];
             }
             self.miniHolder.alpha = 0;
@@ -535,17 +552,31 @@ static BOOL IKSame(NSString *a, NSString *b) {
 
     if (target == IKStateHidden) {
         vanish(0.3, ^{
-            if (self.shownState == IKStateHidden) self.island.alpha = 0;
+            if (transitionToken == self.transitionToken && self.shownState == IKStateHidden) {
+                self.island.alpha = 0;
+                self.miniHolder.alpha = 0;
+            }
+        });
+        // 动画完成回调在窗口层级切换或宿主进程暂停时可能不返回，固定兜底保证内容最终隐藏。
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.38 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            if (transitionToken == self.transitionToken && self.shownState == IKStateHidden) {
+                self.island.alpha = 0;
+                self.miniHolder.alpha = 0;
+                self.island.transform = CGAffineTransformIdentity;
+            }
         });
     } else if (fromHidden) {
         appear();
     } else if (wasNotif != isNotif) {
         // 音乐和通知互相切换：先收起，再以新内容出现
         vanish(0.2, ^{
-            if (self.shownState != target) return; // 期间状态又变了，交给后一次 update
+            if (transitionToken != self.transitionToken || self.shownState != target) return;
             appear();
             if (isNotif) [self.island playNotifEntrance];
         });
+    } else if (!geometryChanged) {
+        // 播放进度和歌词定时器会频繁刷新内容，同一状态的相同几何不重复启动弹簧。
+        self.island.state = target;
     } else {
         // 同类状态之间的大小变化
         self.island.state = target;

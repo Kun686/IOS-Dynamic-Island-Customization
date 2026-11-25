@@ -18,6 +18,7 @@
 @property (nonatomic) double notifDuration;      // 通知停留秒数
 @property (nonatomic, copy) NSSet<NSString *> *notifApps;
 @property (nonatomic, strong) UIColor *accent;
+@property (nonatomic, strong) UIColor *songTitleColor;   // 双行歌词中的歌名颜色
 @property (nonatomic, strong) UIColor *notifTitleColor;   // 通知标题和应用名颜色
 @property (nonatomic, strong) UIColor *notifMessageColor; // 通知正文颜色
 

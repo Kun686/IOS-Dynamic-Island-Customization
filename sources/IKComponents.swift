@@ -93,42 +93,49 @@ struct TransitionDemo: View {
     @State private var visible = false
     @State private var offset: CGFloat = -28
     @State private var scale: CGFloat = 1
-    @State private var tilt: Double = 0
 
-    private var entrance: Animation {
+    private func entrance(for style: Int) -> Animation {
         switch style {
-        case 1: return .easeOut(duration: 0.42)
+        case 1: return .spring(response: 0.42, dampingFraction: 1.0)
         case 2: return .easeInOut(duration: 0.3)
-        case 3: return .spring(response: 0.5, dampingFraction: 0.7)
-        case 4: return .spring(response: 0.78, dampingFraction: 0.48)
-        default: return .spring(response: 0.62, dampingFraction: 0.72)
+        case 3: return .spring(response: 0.5, dampingFraction: 0.58)
+        case 4: return .spring(response: 0.85, dampingFraction: 0.4)
+        default: return .spring(response: 0.62, dampingFraction: 0.62)
         }
     }
 
-    private func play() {
+    @MainActor
+    private func reset(for style: Int) {
         var transaction = Transaction()
         transaction.animation = nil
         withTransaction(transaction) {
             visible = false
             offset = style == 2 ? 0 : -28
-            scale = style == 3 ? 0.64 : 1
-            tilt = style == 4 ? -6 : 0
+            scale = style == 3 ? 0.6 : 1
         }
+    }
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-            withAnimation(entrance) {
+    @MainActor
+    private func play(style: Int) async {
+        reset(for: style)
+        do {
+            try await Task.sleep(nanoseconds: 50_000_000)
+            guard !Task.isCancelled else { return }
+            withAnimation(entrance(for: style)) {
                 visible = true
                 offset = 0
                 scale = 1
-                tilt = 0
             }
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.65) {
+
+            try await Task.sleep(nanoseconds: 1_650_000_000)
+            guard !Task.isCancelled else { return }
             withAnimation(.easeIn(duration: 0.28)) {
                 visible = false
                 offset = style == 2 ? 0 : -24
-                scale = style == 3 ? 0.72 : 1
+                scale = style == 3 ? 0.7 : 1
             }
+        } catch {
+            // 新的演示触发时，SwiftUI 会取消旧任务，保持当前帧等待新任务接管。
         }
     }
 
@@ -137,10 +144,8 @@ struct TransitionDemo: View {
             .opacity(visible ? 1 : 0)
             .offset(y: offset)
             .scaleEffect(scale)
-            .rotationEffect(.degrees(tilt))
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .onAppear(perform: play)
-            .onChange(of: run) { _ in play() }
+            .task(id: run) { await play(style: style) }
     }
 }
 
@@ -165,7 +170,7 @@ struct IslandPreview: View {
                                 Text("下一句歌词").font(.system(size: 13)).foregroundColor(.ikMuted)
                             }
                         } else {
-                            Text("歌曲名").font(.system(size: 15, weight: .medium)).foregroundColor(.ikText)
+                            Text("歌曲名").font(.system(size: 15, weight: .medium)).foregroundColor(Color(hex: s.songTitleColor))
                         }
                     }
                     Spacer(minLength: 0)

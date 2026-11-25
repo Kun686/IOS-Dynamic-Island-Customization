@@ -28,6 +28,7 @@ typedef NS_ENUM(NSInteger, IKState) {
 
 // 歌词外观
 @property (nonatomic, strong) UIColor *lyricColor;
+@property (nonatomic, strong) UIColor *songTitleColor;
 @property (nonatomic, strong) UIColor *ringColor;
 @property (nonatomic, strong) UIColor *notifTitleColor;
 @property (nonatomic, strong) UIColor *notifMessageColor;
