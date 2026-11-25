@@ -73,12 +73,15 @@ static UIColor *IKColorFromHex(NSString *hex, UIColor *fallback) {
 + (double)windowLevelFromFile {
     NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:IKPrefsPath];
     NSInteger boost = [d[@"windowLevelBoost"] integerValue];
+    NSInteger placement = [d[@"placement"] integerValue];
     // 覆盖模式默认启用最高层级，避免用户还要手动试验层级才能盖住系统岛。
-    if ([d[@"placement"] integerValue] != 0 && !d[@"windowLevelBoost"]) boost = 2;
+    // NSNumber(0) 仍然是非 nil 对象，不能用 !d[key] 判断“默认值”。
+    if (placement != 0 && boost <= 0) boost = 2;
     double level = 10000010.0; // TrollSpeed 原来的值
     if (boost == 1) level = 100000000.0;
     if (boost >= 2) level = 2147483000.0;
-    [IKPrefs log:[NSString stringWithFormat:@"windowLevel boost=%ld level=%.0f", (long)boost, level]];
+    [IKPrefs log:[NSString stringWithFormat:@"windowLevel placement=%ld boost=%ld level=%.0f",
+                  (long)placement, (long)boost, level]];
     return level;
 }
 
@@ -118,6 +121,8 @@ static UIColor *IKColorFromHex(NSString *hex, UIColor *fallback) {
 
     UIColor *lime = [UIColor colorWithRed:0xB8 / 255.0 green:0xF3 / 255.0 blue:0x4A / 255.0 alpha:1];
     self.accent = IKColorFromHex(d[@"accent"], lime);
+    self.notifTitleColor = IKColorFromHex(d[@"notifTitleColor"], [UIColor whiteColor]);
+    self.notifMessageColor = IKColorFromHex(d[@"notifMessageColor"], [UIColor colorWithWhite:1 alpha:0.66]);
 
     self.lyricColorMode = (NSInteger)n(@"lyricColorMode", 0);
     self.ringColorMode  = (NSInteger)n(@"ringColorMode", 1);

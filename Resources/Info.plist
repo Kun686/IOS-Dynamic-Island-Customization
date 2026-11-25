@@ -10,8 +10,6 @@
 	<string>TrollSpeed</string>
 	<key>CFBundleIconFile</key>
 	<string>icon.png</string>
-	<key>CFBundleIconName</key>
-	<string>AppIcon</string>
 	<key>CFBundleIdentifier</key>
 	<string>ch.xxtou.hudapp</string>
 	<key>CFBundleInfoDictionaryVersion</key>

@@ -86,6 +86,65 @@ struct Caption: View {
 enum PreviewMode: Hashable { case idle, music, notif }
 
 @available(iOS 16.0, *)
+struct TransitionDemo: View {
+    var style: Int
+    var settings: Settings
+    var run: Int
+    @State private var visible = false
+    @State private var offset: CGFloat = -28
+    @State private var scale: CGFloat = 1
+    @State private var tilt: Double = 0
+
+    private var entrance: Animation {
+        switch style {
+        case 1: return .easeOut(duration: 0.42)
+        case 2: return .easeInOut(duration: 0.3)
+        case 3: return .spring(response: 0.5, dampingFraction: 0.7)
+        case 4: return .spring(response: 0.78, dampingFraction: 0.48)
+        default: return .spring(response: 0.62, dampingFraction: 0.72)
+        }
+    }
+
+    private func play() {
+        var transaction = Transaction()
+        transaction.animation = nil
+        withTransaction(transaction) {
+            visible = false
+            offset = style == 2 ? 0 : -28
+            scale = style == 3 ? 0.64 : 1
+            tilt = style == 4 ? -6 : 0
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            withAnimation(entrance) {
+                visible = true
+                offset = 0
+                scale = 1
+                tilt = 0
+            }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.65) {
+            withAnimation(.easeIn(duration: 0.28)) {
+                visible = false
+                offset = style == 2 ? 0 : -24
+                scale = style == 3 ? 0.72 : 1
+            }
+        }
+    }
+
+    var body: some View {
+        IslandPreview(mode: .music, s: settings)
+            .opacity(visible ? 1 : 0)
+            .offset(y: offset)
+            .scaleEffect(scale)
+            .rotationEffect(.degrees(tilt))
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .onAppear(perform: play)
+            .onChange(of: run) { _ in play() }
+    }
+}
+
+@available(iOS 16.0, *)
 struct IslandPreview: View {
     var mode: PreviewMode
     var s: Settings
@@ -121,8 +180,8 @@ struct IslandPreview: View {
                         RoundedRectangle(cornerRadius: 11, style: .continuous).fill(Color(hex: "2A2A31"))
                             .frame(width: 44, height: 44)
                         VStack(alignment: .leading, spacing: 2) {
-                            Text("发送者").font(.system(size: 16, weight: .bold)).foregroundColor(.ikText)
-                            Text("通知内容预览").font(.system(size: 13)).foregroundColor(.ikMuted)
+                            Text("发送者").font(.system(size: 16, weight: .bold)).foregroundColor(Color(hex: s.notifTitleColor))
+                            Text("通知内容预览").font(.system(size: 13)).foregroundColor(Color(hex: s.notifMessageColor))
                         }
                         Spacer(minLength: 0)
                     }

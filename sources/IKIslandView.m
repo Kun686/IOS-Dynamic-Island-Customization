@@ -253,12 +253,15 @@
 - (void)applyColors {
     BOOL notif = (self.state == IKStateNotif);
     UIColor *lyric = self.lyricColor ?: self.accent;
+    UIColor *notifTitle = self.notifTitleColor ?: [UIColor whiteColor];
+    UIColor *notifMessage = self.notifMessageColor ?: [UIColor colorWithWhite:1 alpha:0.66];
     // 双行时第一行是歌名，第二行是当前歌词。高亮层只覆盖当前歌词。
-    self.label1.textColor = notif ? [UIColor whiteColor]
+    self.label1.textColor = notif ? notifTitle
                                   : (self.lyricLines >= 2 ? [UIColor colorWithWhite:1 alpha:0.66]
                                                           : [UIColor colorWithWhite:1 alpha:0.5]);
-    self.label2.textColor = notif ? [UIColor colorWithWhite:1 alpha:0.66]
+    self.label2.textColor = notif ? notifMessage
                                   : [UIColor colorWithWhite:1 alpha:0.5];
+    self.appLabel.textColor = notif ? notifTitle : [UIColor colorWithWhite:0.66 alpha:1];
     self.label1H.textColor = lyric;
     self.label2H.textColor = lyric;
     self.ring.strokeColor = (self.ringColor ?: self.accent).CGColor;
@@ -266,6 +269,8 @@
 
 - (void)setLyricColor:(UIColor *)lyricColor { _lyricColor = lyricColor; [self applyColors]; }
 - (void)setRingColor:(UIColor *)ringColor { _ringColor = ringColor; [self applyColors]; }
+- (void)setNotifTitleColor:(UIColor *)color { _notifTitleColor = color; [self applyColors]; }
+- (void)setNotifMessageColor:(UIColor *)color { _notifMessageColor = color; [self applyColors]; }
 
 - (void)setLyricEffect:(NSInteger)lyricEffect {
     if (_lyricEffect == lyricEffect) return;
@@ -359,9 +364,9 @@
 - (void)applySweep {
     UILabel *highlight = self.lyricLines >= 2 ? self.label2H : self.label1H;
     CALayer *host = highlight.layer;
+    self.label1H.layer.mask = nil;
+    self.label2H.layer.mask = nil;
     if (self.lyricEffect != 1 || self.sweepDuration <= 0 || highlight.hidden) {
-        self.label1H.layer.mask = nil;
-        self.label2H.layer.mask = nil;
         return;
     }
     CGFloat h = highlight.bounds.size.height;
@@ -468,6 +473,21 @@
             v.alpha = 1;
         } completion:nil];
     }
+}
+
+- (void)playInteractionPulse {
+    [self.layer removeAnimationForKey:@"ik.interactionPulse"];
+    CASpringAnimation *pulse = [CASpringAnimation animationWithKeyPath:@"transform.scale"];
+    pulse.fromValue = @1.0;
+    pulse.toValue = @1.035;
+    pulse.initialVelocity = 0.4;
+    pulse.damping = 12;
+    pulse.stiffness = 180;
+    pulse.mass = 1;
+    pulse.duration = 0.42;
+    pulse.autoreverses = YES;
+    pulse.removedOnCompletion = YES;
+    [self.layer addAnimation:pulse forKey:@"ik.interactionPulse"];
 }
 
 - (void)layoutSubviews {

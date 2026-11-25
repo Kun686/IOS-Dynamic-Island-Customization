@@ -25,7 +25,7 @@ Bundle ID 仍是 `ch.xxtou.hudapp`，安装会覆盖原版 TrollSpeed。
 - `IKController`：状态机，优先级 通知 > 音乐 > 隐藏；过渡动画；从封面取主色。
 - `IKIslandView`：黑色胶囊、旋转封面、音柱、歌词填色、进度环。
 - `IKMusicCenter`：通过 MediaRemote 读系统“正在播放”信息。
-- `IKNotificationSource`：通过 BulletinBoard 的 BBObserver 读其他应用的新通知，并尝试取发送者头像。
+- `IKNotificationSource`：通过 BulletinBoard 的 BBObserver 读其他应用的新通知，并从通信上下文的 `imageName`、应用资源包、附件和本地图片资源中解析发送者头像。
 - `IKPrefs`：读配置；自动识别开孔位置和悬浮层级；诊断日志。
 
 ## 歌词从哪来
@@ -51,19 +51,19 @@ Bundle ID 仍是 `ch.xxtou.hudapp`，安装会覆盖原版 TrollSpeed。
 
 `enabled` `notif` `lyric` `spin` `pauseStops` `progressRing`（布尔），`lyricLines`（1/2），
 `lyricEffect`（0 无 / 1 填色 / 2 淡入），`lyricFontSize`，`spinSeconds` `notifDuration`（秒），
-`notifApps`（bundle ID 数组），`accent` `lyricColor` `ringColor`（十六进制颜色），
+`notifApps`（bundle ID 数组），`accent` `lyricColor` `ringColor` `notifTitleColor` `notifMessageColor`（十六进制颜色），
 `lyricColorMode` `ringColorMode`（0 强调色 / 1 封面 / 2 自定义），`placement`（0 岛下方 / 1 覆盖岛），
-`transitionStyle`（0–4），`windowLevelBoost`（0–2，需重启悬浮进程），
+`transitionStyle`（0–4），`windowLevelBoost`（0–2，设置后即时重新注册窗口），
 `islandTop` `cutoutWidth` `cutoutHeight` `belowTop`（可选，覆盖自动识别的结果）。
 
 ## 已知限制
 
 - 系统横幅压不掉，需要用户在系统设置里关掉对应应用的横幅。
 - 锁屏时不显示（TrollSpeed 在锁屏时隐藏整个悬浮窗）。
-- 悬浮进程只监听触摸而不拦截，点岛的同时下面的应用也会收到点击。
-- “覆盖系统岛”模式下，系统岛显示自己的内容时可能盖在上面。
+- 覆盖模式下，自定义胶囊可见区域优先接收触摸，长按会在歌词和紧凑态之间切换并给出触觉反馈；胶囊隐藏时开孔区域交还给系统灵动岛。
+- 系统展开内容、来电等系统界面由 SpringBoard 决定，覆盖层会让开系统岛区域。
 - 只支持竖屏。
 
 ## 设置界面
 
-iOS 16 及以上启动 App 后直接进入 IslandKit 设置界面，歌词、封面与进度、通知、动画、外观和关于页面分别独立。开发者信息为亦辰，微信 `-6-6-6666`。
+iOS 16 及以上启动 App 后直接进入 IslandKit 设置界面，歌词、封面与进度、通知、动画、外观和关于页面分别独立。动画页面点选样式会播放一次出现、停留和收起预览。开发者信息为亦辰，微信 `-6-6-6666`。

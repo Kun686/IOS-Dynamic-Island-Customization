@@ -212,6 +212,21 @@ struct NotifyView: View {
                 Segmented(value: $store.s.notifDuration, options: [(3.0, "3 秒"), (5.0, "5 秒"), (8.0, "8 秒")], accent: accent)
             }
 
+            Card {
+                Caption("通知文字颜色")
+                ColorPicker("标题和应用名", selection: Binding(
+                    get: { Color(hex: store.s.notifTitleColor) },
+                    set: { store.s.notifTitleColor = $0.hexString }), supportsOpacity: false)
+                    .font(.system(size: 15))
+                    .frame(minHeight: 44)
+                ColorPicker("正文", selection: Binding(
+                    get: { Color(hex: store.s.notifMessageColor) },
+                    set: { store.s.notifMessageColor = $0.hexString }), supportsOpacity: false)
+                    .font(.system(size: 15))
+                    .frame(minHeight: 44)
+                Caption("颜色会即时应用到标题、应用名和通知正文。")
+            }
+
             VStack(alignment: .leading, spacing: 8) {
                 Caption("使用灵动岛通知的应用（已选 \(store.s.notifApps.count) 个）")
                 TextField("搜索应用", text: $query)
@@ -247,7 +262,7 @@ struct NotifyView: View {
             .background(Color.ikCard)
             .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
 
-            Caption("系统横幅无法由本应用关闭。想只看岛上的显示，请到 系统设置 → 通知 里把对应应用的“横幅”关掉。聊天类通知会优先显示发送者头像。")
+            Caption("系统横幅无法由本应用关闭。想只看岛上的显示，请到 系统设置 → 通知 里把对应应用的“横幅”关掉。覆盖模式下长按系统岛区域会交还给系统处理。")
         }
         .task {
             let list = await Task.detached { AppList.load() }.value
@@ -331,6 +346,7 @@ struct CoverView: View {
 @available(iOS 16.0, *)
 struct AppearanceView: View {
     @EnvironmentObject var store: Store
+    @State private var demoRun = 0
 
     private let styles: [(Int, String, String)] = [
         (0, "回弹下落", "从岛背后落下，轻微回弹"),
@@ -345,11 +361,17 @@ struct AppearanceView: View {
         Page(title: "外观与动画") {
             Card {
                 Caption("过渡动画")
+                TransitionDemo(style: store.s.transitionStyle, settings: store.s, run: demoRun)
+                    .frame(height: 110)
+                    .background(Color.ikStage)
+                    .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+                Caption("点选任一项可预览一次出现、停留和收起。")
                 ForEach(styles.indices, id: \.self) { i in
                     let item = styles[i]
                     let on = store.s.transitionStyle == item.0
                     Button {
                         store.s.transitionStyle = item.0
+                        demoRun += 1
                     } label: {
                         HStack {
                             VStack(alignment: .leading, spacing: 2) {
@@ -374,13 +396,13 @@ struct AppearanceView: View {
                 Segmented(value: $store.s.placement, options: [(0, "系统岛下方"), (1, "覆盖系统岛")], accent: accent)
                 Caption(store.s.placement == 0
                         ? "系统岛照常显示，歌词和通知挂在它下面，不遮挡状态栏时间。"
-                        : "盖在系统岛上，位置和大小按机型自动识别，并自动使用更高的悬浮窗层级。")
+                        : "盖在系统岛上，位置和大小按机型自动识别，并自动使用最高悬浮窗层级。长按自定义胶囊可切换歌词和紧凑态。")
             }
 
             Card {
                 Caption("悬浮窗层级（实验）")
                 Segmented(value: $store.s.windowLevelBoost, options: [(0, "默认"), (1, "更高"), (2, "最高")], accent: accent)
-                Caption("用来试验能否盖过系统岛。改完要在首页把运行开关关掉再打开才生效。如果出现异常，改回“默认”。")
+                Caption("覆盖模式默认使用最高层级。切换后会即时重新注册窗口，不需要重启悬浮窗。")
             }
 
             Card {

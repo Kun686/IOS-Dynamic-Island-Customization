@@ -29,6 +29,8 @@ typedef NS_ENUM(NSInteger, IKState) {
 // 歌词外观
 @property (nonatomic, strong) UIColor *lyricColor;
 @property (nonatomic, strong) UIColor *ringColor;
+@property (nonatomic, strong) UIColor *notifTitleColor;
+@property (nonatomic, strong) UIColor *notifMessageColor;
 @property (nonatomic) NSInteger lyricEffect;   // 0 无；1 逐行填色；2 淡入
 @property (nonatomic) CGFloat lyricFontSize;
 
@@ -46,4 +48,5 @@ typedef NS_ENUM(NSInteger, IKState) {
 
 // 通知出现时的过渡：图标弹入，文字依次上滑淡入
 - (void)playNotifEntrance;
+- (void)playInteractionPulse;
 @end

@@ -67,6 +67,78 @@ static id IKValue(id obj, NSString *key) {
     }
 }
 
+static UIImage *IKImageFromValueEnhanced(id value);
+
+static UIImage *IKImageFromNamedValue(NSString *name) {
+    if (name.length == 0) return nil;
+
+    if ([name hasPrefix:@"file://"]) {
+        NSURL *url = [NSURL URLWithString:name];
+        if (url.isFileURL) {
+            UIImage *image = [UIImage imageWithContentsOfFile:url.path];
+            if (image) return image;
+        }
+    }
+
+    NSString *expanded = [name stringByExpandingTildeInPath];
+    NSMutableArray<NSString *> *paths = [NSMutableArray array];
+    if ([expanded hasPrefix:@"/"]) [paths addObject:expanded];
+
+    NSString *leaf = expanded.lastPathComponent;
+    if (leaf.length == 0) leaf = expanded;
+    NSArray<NSString *> *directories = @[
+        @"/var/mobile/Library/BulletinBoard/Images",
+        @"/var/mobile/Library/BulletinBoard/Images/Attachments",
+        @"/var/mobile/Library/BulletinBoard/Attachments",
+        @"/var/mobile/Library/BulletinBoard",
+        @"/var/mobile/Library/SpringBoard/SharedImages",
+        @"/var/mobile/Library/SpringBoard/Images",
+        @"/var/mobile/Library/Notifications/Images",
+        @"/var/mobile/Library/Notifications/Attachments",
+        @"/var/mobile/Library/NotificationCenter/Images",
+        @"/var/mobile/Library/NotificationCenter/Attachments",
+        @"/private/var/mobile/Library/BulletinBoard/Images",
+        @"/private/var/mobile/Library/Notifications/Images"
+    ];
+    for (NSString *directory in directories) {
+        [paths addObject:[directory stringByAppendingPathComponent:leaf]];
+        if (![leaf isEqualToString:expanded] && ![expanded hasPrefix:@"/"]) {
+            [paths addObject:[directory stringByAppendingPathComponent:expanded]];
+        }
+    }
+
+    BOOL hasExtension = leaf.pathExtension.length > 0;
+    NSArray<NSString *> *extensions = hasExtension ? @[@""] : @[@"", @".png", @".jpg", @".jpeg", @"@2x.png", @"@2x.jpg"];
+    for (NSString *path in [paths copy]) {
+        for (NSString *extension in extensions) {
+            NSString *candidate = extension.length ? [path stringByAppendingString:extension] : path;
+            if ([[NSFileManager defaultManager] isReadableFileAtPath:candidate]) {
+                UIImage *image = [UIImage imageWithContentsOfFile:candidate];
+                if (image) return image;
+            }
+        }
+    }
+
+    // 某些系统版本把 imageName 当作 BulletinBoard framework bundle 内的资源名。
+    NSBundle *bulletinBundle = [NSBundle bundleWithPath:@"/System/Library/PrivateFrameworks/BulletinBoard.framework"];
+    UIImage *image = bulletinBundle
+        ? [UIImage imageNamed:name inBundle:bulletinBundle compatibleWithTraitCollection:nil]
+        : nil;
+    return image ?: [UIImage imageNamed:name];
+}
+
+static UIImage *IKImageFromBundleName(NSString *name, NSBundle *bundle) {
+    if (name.length == 0 || !bundle) return nil;
+
+    NSString *leaf = name.lastPathComponent.length ? name.lastPathComponent : name;
+    NSArray<NSString *> *names = @[name, leaf, [leaf stringByDeletingPathExtension]];
+    for (NSString *candidate in names) {
+        UIImage *image = [UIImage imageNamed:candidate inBundle:bundle compatibleWithTraitCollection:nil];
+        if (image) return image;
+    }
+    return nil;
+}
+
 // 在一个对象的属性里找一张图：名字里带 image/avatar/thumbnail 的 NSData、UIImage，或指向本地文件的 URL/路径
 static UIImage *IKFindImage(id obj) {
     if (!obj) return nil;
@@ -84,15 +156,7 @@ static UIImage *IKFindImage(id obj) {
             BOOL pathish = [lower containsString:@"url"] || [lower containsString:@"path"];
             if (!imageish && !pathish) continue;
             id v = IKValue(obj, name);
-            if ([v isKindOfClass:[UIImage class]]) {
-                found = v;
-            } else if ([v isKindOfClass:[NSData class]] && imageish) {
-                found = [UIImage imageWithData:v];
-            } else if ([v isKindOfClass:[NSURL class]] && [(NSURL *)v isFileURL]) {
-                found = [UIImage imageWithContentsOfFile:[(NSURL *)v path]];
-            } else if ([v isKindOfClass:[NSString class]] && [(NSString *)v hasPrefix:@"/"]) {
-                found = [UIImage imageWithContentsOfFile:v];
-            }
+            if (imageish || pathish) found = IKImageFromValueEnhanced(v);
         }
         free(props);
         if (found) return found;
@@ -106,9 +170,7 @@ static UIImage *IKImageFromValueEnhanced(id value) {
     if ([value isKindOfClass:[NSURL class]] && [(NSURL *)value isFileURL]) {
         return [UIImage imageWithContentsOfFile:[(NSURL *)value path]];
     }
-    if ([value isKindOfClass:[NSString class]] && [(NSString *)value hasPrefix:@"/"]) {
-        return [UIImage imageWithContentsOfFile:value];
-    }
+    if ([value isKindOfClass:[NSString class]]) return IKImageFromNamedValue(value);
     return nil;
 }
 
@@ -137,7 +199,8 @@ static UIImage *IKFindImageEnhanced(id obj, NSInteger depth) {
         @"image", @"imageData", @"avatar", @"avatarImage", @"senderImage",
         @"contactImage", @"contactAvatar", @"photo", @"photoImage",
         @"thumbnail", @"icon", @"userInfo", @"userInfoDictionary",
-        @"context", @"communicationContext", @"sender", @"contact"
+        @"context", @"communicationContext", @"sender", @"contact", @"imageName",
+        @"fileURL", @"filePath", @"contentURL", @"data", @"imageData"
     ];
     for (NSString *key in knownKeys) {
         UIImage *found = IKFindImageEnhanced(IKValue(obj, key), depth + 1);
@@ -249,15 +312,34 @@ static UIImage *IKFindImageEnhanced(id obj, NSInteger depth) {
         id sender = IKValue(context, @"sender");
         id attachment = IKValue(bulletin, @"primaryAttachment");
         id icon = IKValue(bulletin, @"icon");
+        NSString *imageName = IKString(context, @"imageName");
+        NSString *sectionBundlePath = IKString(bulletin, @"sectionBundlePath");
+        NSBundle *sectionBundle = sectionBundlePath.length ? [NSBundle bundleWithPath:sectionBundlePath] : nil;
+        NSString *appName = nil;
+        @try {
+            Class proxyCls = NSClassFromString(@"LSApplicationProxy");
+            SEL make = NSSelectorFromString(@"applicationProxyForIdentifier:");
+            if ([proxyCls respondsToSelector:make]) {
+                id proxy = ((id (*)(id, SEL, id))objc_msgSend)(proxyCls, make, bundleID);
+                appName = IKString(proxy, @"localizedName");
+                if (!sectionBundle) {
+                    NSURL *bundleURL = IKValue(proxy, @"bundleURL");
+                    if ([bundleURL isKindOfClass:[NSURL class]]) sectionBundle = [NSBundle bundleWithURL:bundleURL];
+                }
+            }
+        } @catch (__unused NSException *e) {}
         UIImage *avatar = nil;
         NSString *avatarFrom = @"-";
         @try {
             if ((avatar = IKFindImageEnhanced(sender, 0))) avatarFrom = @"sender";
+            else if ((avatar = IKImageFromNamedValue(imageName))) avatarFrom = @"communicationContext.imageName";
+            else if ((avatar = IKImageFromBundleName(imageName, sectionBundle))) avatarFrom = @"sectionBundle.imageName";
             else if ((avatar = IKFindImageEnhanced(context, 0))) avatarFrom = @"communicationContext";
             else if ((avatar = IKFindImageEnhanced(attachment, 0))) avatarFrom = @"primaryAttachment";
             else if ((avatar = IKFindImageEnhanced(IKValue(bulletin, @"userInfo"), 0))) avatarFrom = @"userInfo";
         } @catch (__unused NSException *e) {}
-        IKNotifLog(@"头像：%@ from=%@", bundleID, avatarFrom);
+        IKNotifLog(@"头像：%@ from=%@ imageName.len=%lu bundle=%d", bundleID, avatarFrom,
+                   (unsigned long)imageName.length, sectionBundle != nil);
 
         // 第一次遇到这个应用时，把通知对象的结构记下来（只有属性名和类型，没有内容），方便定位头像在哪
         if (![self.dumpedSections containsObject:bundleID]) {
@@ -268,17 +350,6 @@ static UIImage *IKFindImageEnhanced(id obj, NSInteger depth) {
             IKNotifLog(@"结构 primaryAttachment=%@", IKDescribeProperties(attachment));
             IKNotifLog(@"结构 icon=%@", IKDescribeProperties(icon));
         }
-
-        // 应用名
-        NSString *appName = nil;
-        @try {
-            Class proxyCls = NSClassFromString(@"LSApplicationProxy");
-            SEL make = NSSelectorFromString(@"applicationProxyForIdentifier:");
-            if ([proxyCls respondsToSelector:make]) {
-                id proxy = ((id (*)(id, SEL, id))objc_msgSend)(proxyCls, make, bundleID);
-                appName = IKString(proxy, @"localizedName");
-            }
-        } @catch (__unused NSException *e) {}
 
         [ctl showNotificationWithBundle:bundleID
                                 appName:appName ?: bundleID

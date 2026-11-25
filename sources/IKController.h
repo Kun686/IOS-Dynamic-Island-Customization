@@ -10,6 +10,10 @@
 @property (nonatomic) BOOL suspended;
 - (void)refresh;
 
+// 覆盖模式下，只有自定义胶囊可见时才接管对应触摸点。
+// 其他开孔区域交还给系统灵动岛处理。
+- (BOOL)shouldHandleTouchAtPoint:(CGPoint)point;
+
 // 该应用的通知是否由岛接管
 - (BOOL)shouldTakeBundle:(NSString *)bundleID;
 // avatar：发送者头像，没有就传 nil，会改用应用图标

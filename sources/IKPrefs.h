@@ -18,6 +18,8 @@
 @property (nonatomic) double notifDuration;      // 通知停留秒数
 @property (nonatomic, copy) NSSet<NSString *> *notifApps;
 @property (nonatomic, strong) UIColor *accent;
+@property (nonatomic, strong) UIColor *notifTitleColor;   // 通知标题和应用名颜色
+@property (nonatomic, strong) UIColor *notifMessageColor; // 通知正文颜色
 
 // 岛的几何参数，不同机型可在 plist 里微调
 @property (nonatomic) CGFloat islandTop;         // 默认 11
@@ -26,7 +28,7 @@
 
 // 过渡动画。0 回弹下落；1 柔和滑入；2 淡入；3 缩放弹出；4 果冻
 @property (nonatomic) NSInteger transitionStyle;
-// 悬浮窗层级。0 默认；1 更高；2 最高（改后需重启悬浮进程）
+// 悬浮窗层级。0 默认；1 更高；2 最高。覆盖模式的默认值会自动使用最高层级。
 @property (nonatomic) NSInteger windowLevelBoost;
 + (double)windowLevelFromFile;
 

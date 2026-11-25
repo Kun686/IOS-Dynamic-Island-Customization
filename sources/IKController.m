@@ -19,6 +19,7 @@
 @property (nonatomic, copy) NSString *notifMessage;
 
 @property (nonatomic) BOOL userCollapsed;               // 用户点了一下，把歌词态收成紧凑态
+@property (nonatomic) BOOL longPressHandled;
 @property (nonatomic) CFAbsoluteTime pauseGraceUntil;   // 暂停后再显示几秒
 @property (nonatomic) BOOL wasPlaying;
 
@@ -69,7 +70,13 @@ static void IKPrefsChanged(CFNotificationCenterRef c, void *o, CFStringRef n, co
     self.island = [IKIslandView new];
     self.island.alpha = 0;
     [container addSubview:self.island];
-    [self.island addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(tapped)]];
+    UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(tapped)];
+    UILongPressGestureRecognizer *longPress = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(longPressed:)];
+    longPress.minimumPressDuration = 0.45;
+    longPress.allowableMovement = 18;
+    [tap requireGestureRecognizerToFail:longPress];
+    [self.island addGestureRecognizer:tap];
+    [self.island addGestureRecognizer:longPress];
 
     self.miniHolder = [UIView new];
     self.miniHolder.backgroundColor = [UIColor blackColor];
@@ -308,6 +315,35 @@ static BOOL IKSame(NSString *a, NSString *b) {
     }
 }
 
+- (void)longPressed:(UILongPressGestureRecognizer *)gesture {
+    if (gesture.state == UIGestureRecognizerStateEnded || gesture.state == UIGestureRecognizerStateCancelled || gesture.state == UIGestureRecognizerStateFailed) {
+        self.longPressHandled = NO;
+        return;
+    }
+    if (gesture.state != UIGestureRecognizerStateBegan || self.longPressHandled) return;
+    self.longPressHandled = YES;
+
+    BOOL handled = NO;
+    if (self.notifActive) {
+        [self dismissNotification];
+        handled = YES;
+        [IKPrefs log:@"interaction longPress dismissNotification"];
+    } else if (self.shownState == IKStateLyric || self.shownState == IKStateMusicCompact) {
+        // 长按自己的胶囊在歌词和紧凑态之间切换，点按仍保留原有行为。
+        self.userCollapsed = !self.userCollapsed;
+        [self update];
+        [self.island playInteractionPulse];
+        handled = YES;
+        [IKPrefs log:[NSString stringWithFormat:@"interaction longPress state=%@",
+                      self.userCollapsed ? @"compact" : @"lyric"]];
+    }
+    if (!handled) return;
+
+    UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
+    [feedback prepare];
+    [feedback impactOccurred];
+}
+
 #pragma mark 布局与状态
 
 - (void)refresh {
@@ -318,6 +354,14 @@ static BOOL IKSame(NSString *a, NSString *b) {
     // 宿主会让容器跟随屏幕方向，用容器的宽高判断即可
     CGSize size = self.container ? self.container.bounds.size : [UIScreen mainScreen].bounds.size;
     return size.width <= size.height;
+}
+
+- (BOOL)shouldHandleTouchAtPoint:(CGPoint)point {
+    if (!self.island || self.island.hidden || self.island.alpha < 0.01 || !self.container) return NO;
+
+    CGPoint localPoint = [self.container convertPoint:point fromView:self.container.window];
+    CGRect islandFrame = [self.island convertRect:self.island.bounds toView:self.container];
+    return CGRectContainsPoint(CGRectInset(islandFrame, -8, -8), localPoint);
 }
 
 - (CGRect)frameForState:(IKState)state musicOn:(BOOL)musicOn {
@@ -381,6 +425,8 @@ static BOOL IKSame(NSString *a, NSString *b) {
     }
     self.island.lyricColor = [self colorForMode:p.lyricColorMode custom:p.lyricColor];
     self.island.ringColor = [self colorForMode:p.ringColorMode custom:p.ringColor];
+    self.island.notifTitleColor = p.notifTitleColor;
+    self.island.notifMessageColor = p.notifMessageColor;
     self.island.lyricEffect = p.lyricEffect;
     self.island.lyricFontSize = p.lyricFontSize;
 

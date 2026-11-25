@@ -22,6 +22,8 @@ struct Settings {
     var notifDuration = 5.0
     var notifApps: [String] = []
     var accent = "#B8F34A"
+    var notifTitleColor = "#FFFFFF"
+    var notifMessageColor = "#A8A8B0"
 
     init() {}
 
@@ -46,6 +48,8 @@ struct Settings {
         notifDuration = d["notifDuration"] as? Double ?? notifDuration
         notifApps = d["notifApps"] as? [String] ?? notifApps
         accent = d["accent"] as? String ?? accent
+        notifTitleColor = d["notifTitleColor"] as? String ?? notifTitleColor
+        notifMessageColor = d["notifMessageColor"] as? String ?? notifMessageColor
     }
 
     var dict: [String: Any] {
@@ -58,6 +62,7 @@ struct Settings {
             "lyricEffect": lyricEffect, "lyricFontSize": lyricFontSize,
             "lyricColorMode": lyricColorMode, "ringColorMode": ringColorMode,
             "lyricColor": lyricColor, "ringColor": ringColor,
+            "notifTitleColor": notifTitleColor, "notifMessageColor": notifMessageColor,
         ]
     }
 }
