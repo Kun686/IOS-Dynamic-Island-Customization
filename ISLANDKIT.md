@@ -53,7 +53,7 @@ Bundle ID 仍是 `ch.xxtou.hudapp`，安装会覆盖原版 TrollSpeed。
 
 `enabled` `notif` `lyric` `spin` `pauseStops` `progressRing`（布尔），`lyricLines`（1/2），
 `lyricEffect`（0 无 / 1 填色 / 2 淡入），`lyricFontSize`，`spinSeconds` `notifDuration`（秒），
-`notifApps`（bundle ID 数组），`accent` `lyricColor` `ringColor` `notifTitleColor` `notifMessageColor`（十六进制颜色），
+`notifApps`（bundle ID 数组），`accent` `songTitleColor` `lyricColor` `ringColor` `notifTitleColor` `notifMessageColor`（十六进制颜色），
 `lyricColorMode` `ringColorMode`（0 强调色 / 1 封面 / 2 自定义），`placement`（0 岛下方 / 1 覆盖岛），
 `transitionStyle`（0–4），`windowLevelBoost`（0–2，设置后即时重新注册窗口），
 `islandTop` `cutoutWidth` `cutoutHeight` `belowTop`（可选，覆盖自动识别的结果）。

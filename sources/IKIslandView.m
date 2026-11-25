@@ -186,6 +186,7 @@
 @property (nonatomic) BOOL configuredSweepPlaying;
 @property (nonatomic, strong) CAShapeLayer *ringTrack;
 @property (nonatomic, strong) CAShapeLayer *ring;
+- (void)removeLyricScrollAnimationsForViews:(NSArray<UIView *> *)views;
 @end
 
 @implementation IKIslandView
@@ -361,17 +362,17 @@
         }
         t.duration = 0.32;
         t.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
-        for (UIView *v in @[self.label1, self.label1H, self.label2, self.label2H]) {
+        NSArray<UIView *> *changingViews = two
+            ? @[self.label2, self.label2H]
+            : @[self.label1, self.label1H];
+        [self removeLyricScrollAnimationsForViews:changingViews];
+        for (UIView *v in changingViews) {
             v.clipsToBounds = YES;
             [v.layer addAnimation:t forKey:@"ik.line"];
         }
-        self.label1Offset = 0;
-        self.label2Offset = 0;
+        if (two) self.label2Offset = 0;
+        else self.label1Offset = 0;
         self.sweepConfigured = NO;
-        [self.label1.layer removeAnimationForKey:@"ik.lyricScroll"];
-        [self.label1H.layer removeAnimationForKey:@"ik.lyricScroll"];
-        [self.label2.layer removeAnimationForKey:@"ik.lyricScroll"];
-        [self.label2H.layer removeAnimationForKey:@"ik.lyricScroll"];
     }
     if (two) {
         self.label1.text = next;
@@ -417,8 +418,17 @@
 }
 
 - (void)removeLyricScrollAnimations {
-    for (UIView *view in @[self.label1, self.label1H, self.label2, self.label2H]) {
-        [view.layer removeAnimationForKey:@"ik.lyricScroll"];
+    [self removeLyricScrollAnimationsForViews:@[self.label1, self.label1H, self.label2, self.label2H]];
+}
+
+- (void)removeLyricScrollAnimationsForViews:(NSArray<UIView *> *)views {
+    // UIView 的 frame 动画使用 position/bounds 图层键，不会使用自定义名称。
+    // 保留 ik.line 和 ik.fade，避免清掉换句过渡。
+    for (UIView *view in views) {
+        [view.layer removeAnimationForKey:@"position"];
+        [view.layer removeAnimationForKey:@"bounds"];
+        [view.layer removeAnimationForKey:@"bounds.size"];
+        [view.layer removeAnimationForKey:@"frame"];
     }
 }
 
@@ -427,38 +437,38 @@
     UILabel *track = self.lyricLines >= 2 ? self.label2 : self.label1;
     UIView *viewport = self.lyricLines >= 2 ? self.label2Viewport : self.label1Viewport;
     CALayer *host = highlight.layer;
-    BOOL canSweep = self.lyricEffect == 1 && self.sweepDuration > 0 && !highlight.hidden
-        && viewport.bounds.size.width > 0;
-
-    if (!canSweep) {
-        self.label1H.layer.mask = nil;
-        self.label2H.layer.mask = nil;
-        [self removeLyricScrollAnimations];
-        self.label1Offset = 0;
-        self.label2Offset = 0;
-        [self setTrackOffset:0 label:self.label1 highlight:self.label1H];
-        [self setTrackOffset:0 label:self.label2 highlight:self.label2H];
-        self.sweepConfigured = NO;
-        return;
-    }
-
+    BOOL hasTiming = self.sweepDuration > 0 && viewport.bounds.size.width > 0;
+    BOOL canFill = self.lyricEffect == 1 && hasTiming && !highlight.hidden;
+    BOOL canScroll = hasTiming && !track.hidden;
     CGFloat h = highlight.bounds.size.height;
-    CGFloat textW = [self textWidthForLabel:highlight];
+    CGFloat textW = [self textWidthForLabel:track];
     CGFloat full = MAX(0, textW);
-    if (full <= 0 || h <= 0) {
+    CGFloat overflow = MAX(0, textW - viewport.bounds.size.width);
+
+    if (!canFill && host.mask != nil) {
         host.mask = nil;
+    }
+    if (!canScroll || full <= 0 || h <= 0) {
+        [self removeLyricScrollAnimations];
+        if (!canScroll) {
+            self.label1Offset = 0;
+            self.label2Offset = 0;
+            [self setTrackOffset:0 label:self.label1 highlight:self.label1H];
+            [self setTrackOffset:0 label:self.label2 highlight:self.label2H];
+        }
+        self.sweepConfigured = NO;
         return;
     }
 
     double frac = self.sweepPlaying
         ? MAX(0, MIN(1, (CACurrentMediaTime() - self.sweepStart) / self.sweepDuration))
         : self.sweepPausedFraction;
-    CGFloat overflow = MAX(0, textW - viewport.bounds.size.width);
-    CGFloat targetOffset = -overflow * frac;
+    // 播放时文字从左端滚到右端，暂停时停在当前填色比例对应的位置。
+    CGFloat targetOffset = self.sweepPlaying ? -overflow : -overflow * frac;
     BOOL sameSweep = self.sweepConfigured
         && self.configuredSweepPlaying == self.sweepPlaying
         && fabs(self.configuredSweepStart - self.sweepStart) < 0.05
-        && host.mask != nil;
+        && ((!canFill && host.mask == nil) || (canFill && host.mask != nil));
 
     if (!self.sweepMask) {
         self.sweepMask = [CALayer layer];
@@ -467,30 +477,34 @@
     }
     CALayer *mask = self.sweepMask;
     if (!sameSweep) {
-        [self removeLyricScrollAnimations];
-        self.label1H.layer.mask = nil;
-        self.label2H.layer.mask = nil;
         CGFloat currentOffset = [self presentationOffsetForLabel:track
                                                              fallback:(self.lyricLines >= 2 ? self.label2Offset : self.label1Offset)];
+        // 先读取 presentation layer，再移除 UIView 动画，否则暂停或改色时
+        // 会丢失当前滚动位置，文字瞬间跳到旧的模型值。
+        [self removeLyricScrollAnimations];
         [self setTrackOffset:currentOffset label:track highlight:highlight];
-        [CATransaction begin];
-        [CATransaction setDisableActions:YES];
-        [mask removeAllAnimations];
-        mask.position = CGPointZero;
-        mask.bounds = CGRectMake(0, 0, full, h);
-        mask.transform = CATransform3DMakeScale(frac, 1, 1);
-        host.mask = mask;
-        [CATransaction commit];
+        if (canFill) {
+            [CATransaction begin];
+            [CATransaction setDisableActions:YES];
+            [mask removeAllAnimations];
+            mask.position = CGPointZero;
+            mask.bounds = CGRectMake(0, 0, full, h);
+            mask.transform = CATransform3DMakeScale(frac, 1, 1);
+            host.mask = mask;
+            [CATransaction commit];
+        }
 
         if (self.sweepPlaying && frac < 1) {
-            CABasicAnimation *fill = [CABasicAnimation animationWithKeyPath:@"transform.scale.x"];
-            fill.fromValue = @(frac);
-            fill.toValue = @1.0;
-            fill.duration = self.sweepDuration * (1 - frac);
-            fill.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionLinear];
-            fill.fillMode = kCAFillModeForwards;
-            fill.removedOnCompletion = NO;
-            [mask addAnimation:fill forKey:@"ik.sweep"];
+            if (canFill) {
+                CABasicAnimation *fill = [CABasicAnimation animationWithKeyPath:@"transform.scale.x"];
+                fill.fromValue = @(frac);
+                fill.toValue = @1.0;
+                fill.duration = self.sweepDuration * (1 - frac);
+                fill.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionLinear];
+                fill.fillMode = kCAFillModeForwards;
+                fill.removedOnCompletion = NO;
+                [mask addAnimation:fill forKey:@"ik.sweep"];
+            }
 
             CGFloat *storedOffset = self.lyricLines >= 2 ? &_label2Offset : &_label1Offset;
             *storedOffset = targetOffset;
@@ -508,8 +522,6 @@
         self.configuredSweepStart = self.sweepStart;
         self.configuredSweepPlaying = self.sweepPlaying;
         self.sweepConfigured = YES;
-    } else {
-        host.mask = mask;
     }
 }
 
@@ -604,11 +616,14 @@
     viewport.hidden = hidden;
     label.numberOfLines = 1;
     highlight.numberOfLines = 1;
-    label.lineBreakMode = notification ? NSLineBreakByTruncatingTail : NSLineBreakByClipping;
+    BOOL isCurrentLyric = !notification && self.state == IKStateLyric && self.sweepDuration > 0
+        && ((self.lyricLines < 2 && viewport == self.label1Viewport)
+            || (self.lyricLines >= 2 && viewport == self.label2Viewport));
+    label.lineBreakMode = isCurrentLyric ? NSLineBreakByClipping : NSLineBreakByTruncatingTail;
     highlight.lineBreakMode = NSLineBreakByClipping;
 
     CGFloat textWidth = [self textWidthForLabel:label];
-    CGFloat trackWidth = notification ? MAX(0, frame.size.width) : MAX(frame.size.width, textWidth);
+    CGFloat trackWidth = isCurrentLyric ? MAX(frame.size.width, textWidth) : MAX(0, frame.size.width);
     CGRect trackFrame = CGRectMake(offset, 0, trackWidth, frame.size.height);
     label.frame = trackFrame;
     highlight.frame = trackFrame;

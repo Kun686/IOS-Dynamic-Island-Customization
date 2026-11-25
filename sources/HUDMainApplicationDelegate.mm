@@ -16,7 +16,7 @@
 #import "UIWindow+Private.h"
 
 @interface HUDMainApplicationDelegate ()
-- (void)applyWindowLevel;
+- (void)applyWindowLevel:(BOOL)force;
 - (void)scheduleWindowLevelRegistrationRetries;
 @end
 
@@ -24,7 +24,7 @@ static void IKWindowPrefsChanged(CFNotificationCenterRef center, void *observer,
                                  CFStringRef name, const void *object, CFDictionaryRef userInfo) {
     HUDMainApplicationDelegate *delegate = (__bridge HUDMainApplicationDelegate *)observer;
     dispatch_async(dispatch_get_main_queue(), ^{
-        [delegate applyWindowLevel];
+        [delegate applyWindowLevel:NO];
     });
 }
 
@@ -62,13 +62,15 @@ static void IKWindowPrefsChanged(CFNotificationCenterRef center, void *observer,
     CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), (__bridge void *)self,
                                     IKWindowPrefsChanged, CFSTR(IKPrefsChangedDarwin), NULL,
                                     CFNotificationSuspensionBehaviorDeliverImmediately);
-    [self applyWindowLevel];
+    [IKPrefs log:[NSString stringWithFormat:@"touchPassthrough configured=%d",
+                  [HUDRootViewController passthroughMode]]];
+    [self applyWindowLevel:NO];
     [self scheduleWindowLevelRegistrationRetries];
 
     return YES;
 }
 
-- (void)applyWindowLevel {
+- (void)applyWindowLevel:(BOOL)force {
     if (!self.window) return;
     double windowLevel = [IKPrefs windowLevelFromFile];
     [self.window setWindowLevel:windowLevel];
@@ -90,7 +92,7 @@ static void IKWindowPrefsChanged(CFNotificationCenterRef center, void *observer,
     // 设置页会在滑块拖动时连续发通知。相同上下文和层级已经登记成功时跳过，
     // 只有真正改变层级或窗口上下文时才重新登记。
     SEL unregisterSelector = NSSelectorFromString(@"unregisterWindowWithContextID:");
-    if (_hasRegisteredWindow && _registeredContextID == contextId
+    if (!force && _hasRegisteredWindow && _registeredContextID == contextId
         && fabs(_registeredWindowLevel - windowLevel) < 0.5) {
         return;
     }
@@ -119,16 +121,16 @@ static void IKWindowPrefsChanged(CFNotificationCenterRef center, void *observer,
 
 - (void)scheduleWindowLevelRegistrationRetries {
     // 启动早期窗口可能已有 context ID，但 SpringBoard 尚未完成登记。
-    // 这些是有限重试，避免常驻定时器和重复注册。
+    // 这些是有限的强制重试，避免首次登记被系统启动时序吞掉。
     NSArray<NSNumber *> *delays = @[@0.15, @0.45, @1.0, @2.0, @4.0];
     for (NSNumber *delay in delays) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay.doubleValue * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{ [self applyWindowLevel]; });
+                       dispatch_get_main_queue(), ^{ [self applyWindowLevel:YES]; });
     }
 }
 
 - (void)applicationDidBecomeActive:(UIApplication *)application {
-    [self applyWindowLevel];
+    [self applyWindowLevel:NO];
     [self scheduleWindowLevelRegistrationRetries];
 }
 

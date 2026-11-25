@@ -20,6 +20,7 @@
 
 @property (nonatomic) BOOL userCollapsed;               // 用户点了一下，把歌词态收成紧凑态
 @property (nonatomic) CFAbsoluteTime pauseGraceUntil;   // 暂停后再显示几秒
+@property (nonatomic) CFAbsoluteTime lyricPauseStartedAt;
 @property (nonatomic) BOOL wasPlaying;
 @property (nonatomic) NSUInteger transitionToken;
 
@@ -104,12 +105,19 @@ static void IKPrefsChanged(CFNotificationCenterRef c, void *o, CFStringRef n, co
 
 - (void)musicChanged {
     IKMusicCenter *m = [IKMusicCenter shared];
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
 
     if (self.wasPlaying && !m.isPlaying) {
-        self.pauseGraceUntil = CFAbsoluteTimeGetCurrent() + 8;
+        self.pauseGraceUntil = now + 8;
+        self.lyricPauseStartedAt = now;
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(8.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             [self update];
         });
+    } else if (!self.wasPlaying && m.isPlaying && self.lyricPauseStartedAt > 0) {
+        // 歌词时钟只应在播放时推进。把暂停区间从墙上时钟中扣掉，
+        // 这样恢复播放时填色和长歌词滚动会从暂停位置继续。
+        self.lyricChangedAt += now - self.lyricPauseStartedAt;
+        self.lyricPauseStartedAt = 0;
     }
     self.wasPlaying = m.isPlaying;
 
@@ -295,6 +303,8 @@ static BOOL IKSame(NSString *a, NSString *b) {
 }
 
 - (void)tapped {
+    [IKPrefs log:[NSString stringWithFormat:@"interaction tap state=%ld notif=%d",
+                  (long)self.shownState, self.notifActive]];
     if (self.notifActive) {
         NSString *bid = self.notifBundle;
         [self dismissNotification];
@@ -362,11 +372,6 @@ static BOOL IKSame(NSString *a, NSString *b) {
     CGPoint localPoint = [self.container convertPoint:point fromView:window];
     CGRect islandFrame = [self.island convertRect:self.island.bounds toView:self.container];
     return CGRectContainsPoint(CGRectInset(islandFrame, -8, -8), localPoint);
-}
-
-- (BOOL)hasInteractiveIsland {
-    return self.island && !self.island.hidden && self.island.alpha >= 0.01
-        && self.island.userInteractionEnabled;
 }
 
 - (CGRect)frameForState:(IKState)state musicOn:(BOOL)musicOn {

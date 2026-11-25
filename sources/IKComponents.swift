@@ -165,9 +165,14 @@ struct IslandPreview: View {
                     Disc(size: 52, spinning: s.spin, seconds: s.spinSeconds, accent: accent)
                     VStack(alignment: .leading, spacing: 2) {
                         if s.lyric {
-                            Text("当前歌词行").font(.system(size: 16, weight: .bold)).foregroundColor(accent)
                             if s.lyricLines >= 2 {
-                                Text("下一句歌词").font(.system(size: 13)).foregroundColor(.ikMuted)
+                                Text("歌曲名").font(.system(size: 16, weight: .bold))
+                                    .foregroundColor(Color(hex: s.songTitleColor))
+                                Text("当前歌词行").font(.system(size: 13))
+                                    .foregroundColor(accent)
+                            } else {
+                                Text("当前歌词行").font(.system(size: 16, weight: .bold))
+                                    .foregroundColor(accent)
                             }
                         } else {
                             Text("歌曲名").font(.system(size: 15, weight: .medium)).foregroundColor(Color(hex: s.songTitleColor))

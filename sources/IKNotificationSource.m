@@ -69,8 +69,15 @@ static id IKValue(id obj, NSString *key) {
 
 static NSString *IKPathShape(NSString *path) {
     if (path.length == 0) return @"-";
+    NSArray<NSString *> *components = path.pathComponents;
+    NSUInteger libraryIndex = [components indexOfObject:@"Library"];
+    if (libraryIndex != NSNotFound) {
+        NSUInteger count = MIN(components.count - libraryIndex, 3);
+        return [[components subarrayWithRange:NSMakeRange(libraryIndex, count)]
+                componentsJoinedByString:@"/"];
+    }
     NSMutableArray<NSString *> *parts = [NSMutableArray array];
-    for (NSString *part in path.pathComponents) {
+    for (NSString *part in components) {
         if (part.length == 0 || [part isEqualToString:@"/"]) continue;
         [parts addObject:part];
         if (parts.count == 2) break;
@@ -404,7 +411,6 @@ static UIImage *IKFindImageEnhanced(id obj, NSInteger depth) {
             else if ((avatar = IKFindImageEnhanced(accessoryImage, 0))) avatarFrom = @"accessoryImage";
             else if ((avatar = IKFindImageEnhanced(attachment, 0))) avatarFrom = @"primaryAttachment";
             else if ((avatar = IKFindImageEnhanced(attachments, 0))) avatarFrom = @"additionalAttachments";
-            else if ((avatar = IKFindImageEnhanced(icon, 0))) avatarFrom = @"icon";
             else if ((avatar = IKFindImageEnhanced(IKValue(bulletin, @"userInfo"), 0))) avatarFrom = @"userInfo";
         } @catch (__unused NSException *e) {}
         IKNotifLog(@"头像：%@ from=%@ imageName.len=%lu bundle=%d candidates=sender:%d context:%d content:%d attachment:%d accessory:%d icon:%d",

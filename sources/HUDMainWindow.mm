@@ -6,18 +6,16 @@
 //
 
 #import "HUDMainWindow.h"
-#import "HUDRootViewController.h"
 #import "IKController.h"
-#import "IKPrefs.h"
 
 @implementation HUDMainWindow
 
 + (BOOL)_isSystemWindow { return YES; }
 - (BOOL)_isWindowServerHostingManaged { return NO; }
 - (BOOL)_ignoresHitTest {
-    // 全局透传会让自定义胶囊连 UIGestureRecognizer 都收不到。
-    // 只有胶囊本身暂时关闭透传，其他位置仍在 hitTest 中返回 nil。
-    return [HUDRootViewController passthroughMode] && ![[IKController shared] hasInteractiveIsland];
+    // 不能按启动时的透明度决定是否透传。窗口创建时胶囊尚未出现，
+    // 否则后续显示时仍会被旧的全局透传挡住手势。
+    return NO;
 }
 - (BOOL)_isSecure { return YES; }
 - (BOOL)_shouldCreateContextAsSecure { return YES; }

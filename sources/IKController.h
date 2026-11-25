@@ -14,9 +14,6 @@
 // 其他区域交还给系统灵动岛或下层窗口处理。
 - (BOOL)shouldHandleTouchAtPoint:(CGPoint)point;
 
-// HUD 窗口用它决定是否暂时关闭全局透传，让自定义胶囊接收长按和点按。
-- (BOOL)hasInteractiveIsland;
-
 // 该应用的通知是否由岛接管
 - (BOOL)shouldTakeBundle:(NSString *)bundleID;
 // avatar：发送者头像，没有就传 nil，会改用应用图标
