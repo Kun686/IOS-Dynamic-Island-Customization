@@ -42,6 +42,8 @@
 	<true/>
 	<key>com.apple.springboard.disallowNotificationCenter</key>
 	<true/>
+	<key>com.apple.springboard.system-component-layout-monitoring</key>
+	<true/>
 	<key>file-read-data</key>
 	<true/>
 	<key>platform-application</key>
