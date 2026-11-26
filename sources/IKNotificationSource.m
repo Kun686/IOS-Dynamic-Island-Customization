@@ -260,11 +260,11 @@ static UIImage *IKFindImageEnhanced(id obj, NSInteger depth) {
     NSArray<NSString *> *knownKeys = @[
         @"image", @"imageData", @"avatar", @"avatarImage", @"senderImage",
         @"contactImage", @"contactAvatar", @"photo", @"photoImage",
-        @"thumbnail", @"icon", @"userInfo", @"userInfoDictionary",
+        @"thumbnail", @"userInfo", @"userInfoDictionary",
         @"context", @"communicationContext", @"sender", @"contact", @"imageName",
         @"fileURL", @"filePath", @"contentURL", @"data", @"content",
         @"modalAlertContent", @"starkBannerContent", @"accessoryImage",
-        @"accessoryIconMask", @"sectionIcon", @"primaryAttachment",
+        @"accessoryIconMask", @"primaryAttachment",
         @"additionalAttachments", @"attachments", @"recipients"
     ];
     for (NSString *key in knownKeys) {

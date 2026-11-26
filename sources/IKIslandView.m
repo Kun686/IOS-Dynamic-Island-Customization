@@ -339,10 +339,6 @@
     self.label1Offset = 0;
     self.label2Offset = 0;
     self.sweepConfigured = NO;
-    [self.label1.layer removeAnimationForKey:@"ik.lyricScroll"];
-    [self.label1H.layer removeAnimationForKey:@"ik.lyricScroll"];
-    [self.label2.layer removeAnimationForKey:@"ik.lyricScroll"];
-    [self.label2H.layer removeAnimationForKey:@"ik.lyricScroll"];
     self.sweepDuration = 0; // 没有时间信息：整行高亮
     [self applySweep];
 }
@@ -366,6 +362,11 @@
             ? @[self.label2, self.label2H]
             : @[self.label1, self.label1H];
         [self removeLyricScrollAnimationsForViews:changingViews];
+        UILabel *changingLabel = two ? self.label2 : self.label1;
+        UILabel *changingHighlight = two ? self.label2H : self.label1H;
+        [UIView performWithoutAnimation:^{
+            [self setTrackOffset:0 label:changingLabel highlight:changingHighlight];
+        }];
         for (UIView *v in changingViews) {
             v.clipsToBounds = YES;
             [v.layer addAnimation:t forKey:@"ik.line"];
@@ -445,8 +446,12 @@
     CGFloat full = MAX(0, textW);
     CGFloat overflow = MAX(0, textW - viewport.bounds.size.width);
 
-    if (!canFill && host.mask != nil) {
-        host.mask = nil;
+    if (!canFill) {
+        self.label1H.layer.mask = nil;
+        self.label2H.layer.mask = nil;
+    } else {
+        CALayer *otherHost = host == self.label1H.layer ? self.label2H.layer : self.label1H.layer;
+        otherHost.mask = nil;
     }
     if (!canScroll || full <= 0 || h <= 0) {
         [self removeLyricScrollAnimations];
