@@ -14,8 +14,6 @@
 	<array>
 		<string>icon.png</string>
 	</array>
-	<key>CFBundleIconName</key>
-	<string>AppIcon</string>
 	<key>CFBundleIdentifier</key>
 	<string>ch.xxtou.hudapp</string>
 	<key>CFBundleInfoDictionaryVersion</key>

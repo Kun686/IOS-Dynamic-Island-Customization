@@ -130,9 +130,34 @@ static Class IKINImageClass(void) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
         dlopen("/System/Library/Frameworks/Intents.framework/Intents", RTLD_LAZY);
+        dlopen("/System/Library/Frameworks/IntentsUI.framework/IntentsUI", RTLD_LAZY);
         imageClass = NSClassFromString(@"INImage");
     });
     return imageClass;
+}
+
+static void IKLogINImageMethodsOnce(id imageObject) {
+    if (!imageObject) return;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSMutableArray<NSString *> *names = [NSMutableArray array];
+        for (Class c = [imageObject class]; c && c != [NSObject class]; c = class_getSuperclass(c)) {
+            unsigned int count = 0;
+            Method *methods = class_copyMethodList(c, &count);
+            for (unsigned int i = 0; i < count; i++) {
+                NSString *name = NSStringFromSelector(method_getName(methods[i]));
+                NSString *lower = name.lowercaseString;
+                if ([lower containsString:@"image"] || [lower containsString:@"fetch"]
+                    || [lower containsString:@"retrieve"] || [lower containsString:@"url"]) {
+                    if (![names containsObject:name]) [names addObject:name];
+                }
+            }
+            free(methods);
+        }
+        [names sortUsingSelector:@selector(compare:)];
+        IKNotifLog(@"INImage对象：class=%@ methods=%@", NSStringFromClass([imageObject class]),
+                   names.count ? [names componentsJoinedByString:@","] : @"-");
+    });
 }
 
 static UIImage *IKImageFromNamedValue(NSString *name) {
@@ -303,66 +328,19 @@ static UIImage *IKImageFromValueEnhanced(id value) {
     return nil;
 }
 
-static UIImage *IKImageFromINImageObject(id imageObject) {
-    if (!imageObject) return nil;
-    id imageData = IKValue(imageObject, @"imageData");
-    if ([imageData isKindOfClass:[UIImage class]]) return imageData;
-    if ([imageData isKindOfClass:[NSData class]]) return [UIImage imageWithData:imageData];
-    id image = IKValue(imageObject, @"image");
-    if ([image isKindOfClass:[UIImage class]]) return image;
-    return nil;
-}
-
 // BBCommunicationContext 在微信通知里给的是 intents-remote-image-proxy URL。
-// 这个 URL 不是本地文件名，先尝试 Intents 的运行时解码器，再尝试 URL 内嵌的 data/file/HTTP 地址。
-// 解析放在后台队列调用，避免通知主线程被网络或系统代理阻塞。
+// 这个 URL 不是本地文件名，交给 IntentsUI 的公开回调解码。
+// 本地 file/data 资源可以直接解码，避免通知内容触发任意网络请求。
 static UIImage *IKImageFromRemoteURL(NSURL *url) {
     if (!url) return nil;
-    Class imageClass = IKINImageClass();
-    SEL sizedImageWithURL = NSSelectorFromString(@"imageWithURL:width:height:");
-    SEL imageWithURL = NSSelectorFromString(@"imageWithURL:");
-    if (imageClass) {
-        id imageObject = nil;
-        if ([imageClass respondsToSelector:sizedImageWithURL]) {
-            imageObject = ((id (*)(id, SEL, id, double, double))objc_msgSend)(
-                imageClass, sizedImageWithURL, url, 128.0, 128.0);
-        }
-        if (!imageObject && [imageClass respondsToSelector:imageWithURL]) {
-            imageObject = ((id (*)(id, SEL, id))objc_msgSend)(imageClass, imageWithURL, url);
-        }
-        UIImage *image = IKImageFromINImageObject(imageObject);
-        if (image) return image;
-    }
-
     NSString *scheme = [[url scheme] lowercaseString];
-    if ([scheme isEqualToString:@"file"] || [scheme isEqualToString:@"data"]
-        || [scheme isEqualToString:@"http"] || [scheme isEqualToString:@"https"]
-        || [scheme isEqualToString:@"intents-remote-image-proxy"]) {
-        NSData *data = [NSData dataWithContentsOfURL:url options:NSDataReadingMappedIfSafe error:nil];
-        UIImage *image = [UIImage imageWithData:data];
-        if (image) return image;
-    }
-
-    NSURLComponents *components = [NSURLComponents componentsWithURL:url resolvingAgainstBaseURL:NO];
-    for (NSURLQueryItem *item in components.queryItems) {
-        NSString *key = item.name.lowercaseString;
-        NSString *value = item.value;
-        if (![key containsString:@"url"] && ![key containsString:@"uri"] && ![key containsString:@"image"]
-            && ![key containsString:@"data"]) continue;
-        if ([key containsString:@"data"]) {
-            NSData *data = [[NSData alloc] initWithBase64EncodedString:value options:NSDataBase64DecodingIgnoreUnknownCharacters];
-            UIImage *image = [UIImage imageWithData:data];
-            if (image) return image;
-        }
-        NSURL *embedded = [NSURL URLWithString:[value stringByRemovingPercentEncoding] ?: value];
-        UIImage *image = IKImageFromRemoteURL(embedded);
-        if (image) return image;
+    if ([scheme isEqualToString:@"file"] || [scheme isEqualToString:@"data"]) {
+        return IKImageFromValueEnhanced(url);
     }
     return nil;
 }
 
-// 代理头像可能只能由 INImage 异步取回。优先调用系统对象的取图回调，
-// 再用 NSURLSession 处理 file/data/http 以及系统注册的自定义 URL scheme。
+// 代理头像由 IntentsUI 的公开 INImage 回调取回。失败时只保留本地 file/data 回退。
 static void IKResolveRemoteImage(NSURL *url, void (^completion)(UIImage *image)) {
     if (!url || !completion) return;
     NSObject *lock = [NSObject new];
@@ -375,83 +353,56 @@ static void IKResolveRemoteImage(NSURL *url, void (^completion)(UIImage *image))
         completion(resolved);
     };
 
-    Class imageClass = IKINImageClass();
-    SEL sizedImageWithURL = NSSelectorFromString(@"imageWithURL:width:height:");
-    SEL imageWithURL = NSSelectorFromString(@"imageWithURL:");
-    if (imageClass && ([imageClass respondsToSelector:sizedImageWithURL]
-                       || [imageClass respondsToSelector:imageWithURL])) {
-        id imageObject = nil;
-        @try {
-            if ([imageClass respondsToSelector:sizedImageWithURL]) {
-                imageObject = ((id (*)(id, SEL, id, double, double))objc_msgSend)(
-                    imageClass, sizedImageWithURL, url, 128.0, 128.0);
-            } else {
-                imageObject = ((id (*)(id, SEL, id))objc_msgSend)(imageClass, imageWithURL, url);
-            }
-        } @catch (__unused NSException *e) {}
-
-        UIImage *image = IKImageFromINImageObject(imageObject);
-        if (image) {
-            finish(image);
-            return;
-        }
-
-        // iOS 版本间这个私有取图入口的 selector 名称有差异，按实际存在的
-        // 方法调用。回调的第一个参数始终是 NSData 或 UIImage，额外参数会被忽略。
-        for (NSString *name in @[
-            @"retrieveImageDataWithSize:completion:",
-            @"retrieveImageDataWithSize:completionHandler:",
-            @"requestImageDataWithSize:completion:"
-        ]) {
-            SEL retrieve = NSSelectorFromString(name);
-            if (!imageObject || ![imageObject respondsToSelector:retrieve]) continue;
-            void (^handler)(id) = ^(id value) {
-                finish(IKImageFromValueEnhanced(value));
-            };
-            @try {
-                ((void (*)(id, SEL, CGSize, void (^)(id)))objc_msgSend)(
-                    imageObject, retrieve, CGSizeMake(128, 128), handler);
-                // INImage 的代理回调在部分系统上不会返回。先给系统代理一点时间，
-                // 再尝试 URL 加载，最后在有限时间内结束，避免通知一直持有解析任务。
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.2 * NSEC_PER_SEC)),
-                               dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-                    if (finished) return;
-                    UIImage *fallback = IKImageFromRemoteURL(url);
-                    if (fallback) finish(fallback);
-                });
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC)),
-                               dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-                    finish(nil);
-                });
-                return;
-            } @catch (__unused NSException *e) {}
-        }
-    }
-
     UIImage *fallback = IKImageFromRemoteURL(url);
     if (fallback) {
         finish(fallback);
         return;
     }
 
-    NSURLRequest *request = [NSURLRequest requestWithURL:url
-                                             cachePolicy:NSURLRequestReloadIgnoringLocalCacheData
-                                         timeoutInterval:4.0];
-    NSURLSessionDataTask *task = [[NSURLSession sharedSession]
-        dataTaskWithRequest:request
-           completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
-        UIImage *image = (!error && data.length > 0) ? [UIImage imageWithData:data] : nil;
+    Class imageClass = IKINImageClass();
+    SEL imageWithURL = NSSelectorFromString(@"imageWithURL:");
+    SEL fetchImage = NSSelectorFromString(@"fetchUIImageWithCompletion:");
+    id imageObject = nil;
+    @try {
+        if (imageClass && [imageClass respondsToSelector:imageWithURL]) {
+            imageObject = ((id (*)(id, SEL, id))objc_msgSend)(imageClass, imageWithURL, url);
+        }
+    } @catch (NSException *exception) {
+        IKNotifLog(@"头像异步解析：创建INImage失败 class=%@", exception.name);
+    }
+
+    if (!imageObject) {
+        IKNotifLog(@"头像异步解析：阶段=createINImage failed=1 scheme=%@", url.scheme ?: @"-");
+        finish(nil);
+        return;
+    }
+    IKLogINImageMethodsOnce(imageObject);
+    if (![imageObject respondsToSelector:fetchImage]) {
+        IKNotifLog(@"头像异步解析：阶段=fetchUIImageWithCompletion unavailable=1");
+        finish(nil);
+        return;
+    }
+
+    void (^handler)(UIImage *) = ^(UIImage *image) {
         finish(image);
-    }];
-    [task resume];
+    };
+    @try {
+        ((void (*)(id, SEL, void (^)(UIImage *)))objc_msgSend)(imageObject, fetchImage, handler);
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC)),
+                       dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+            finish(nil);
+        });
+    } @catch (NSException *exception) {
+        IKNotifLog(@"头像异步解析：阶段=fetchUIImageWithCompletion exception=%@", exception.name);
+        finish(nil);
+    }
 }
 
 static NSURL *IKRemoteImageURLFromValue(id value, NSInteger depth) {
     if (!value || depth > 3) return nil;
     if ([value isKindOfClass:[NSURL class]]) {
         NSString *scheme = [[(NSURL *)value scheme] lowercaseString];
-        if ([scheme isEqualToString:@"intents-remote-image-proxy"] || [scheme isEqualToString:@"http"]
-            || [scheme isEqualToString:@"https"] || [scheme isEqualToString:@"file"]
+        if ([scheme isEqualToString:@"intents-remote-image-proxy"] || [scheme isEqualToString:@"file"]
             || [scheme isEqualToString:@"data"]) return value;
         return nil;
     }

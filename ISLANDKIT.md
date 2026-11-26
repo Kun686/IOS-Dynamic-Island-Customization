@@ -35,7 +35,9 @@ Bundle ID 仍是 `ch.xxtou.hudapp`，安装会覆盖原版 TrollSpeed。
 会把当前这一句写进标题、歌手或专辑字段，应用会兼容显示，但只能按字段变化估计顺序和时长。
 
 要让歌词顺序和填色进度跟播放器一致，可以用 TrollFools 向 QQ 音乐、网易云音乐等播放器注入插件。插件负责读取播放器内部歌词和播放时钟，
-把下面的属性列表原子写入 `/var/mobile/Library/IslandKit/lyrics.plist`，然后发送 Darwin 通知 `com.islandkit.lyrics/changed`。
+把下面的属性列表原子写入目标播放器自己的 `Library/IslandKit/lyrics.plist`，然后发送 Darwin 通知 `com.islandkit.lyrics/changed`。
+悬浮进程会按 MediaRemote 当前播放应用的 Bundle ID 查找这个容器。为了兼容旧插件，也会回退读取
+`/var/mobile/Library/IslandKit/lyrics.plist`。
 
 ```plist
 {
@@ -54,8 +56,11 @@ Bundle ID 仍是 `ch.xxtou.hudapp`，安装会覆盖原版 TrollSpeed。
 }
 ```
 
-`duration`、`position`、`start`、`end` 和单句 `duration` 使用秒，`updatedAt` 使用 Unix 时间戳秒，`rate` 可选且表示播放速率，缺省为 1。时间轴的 `end` 可以省略，应用会使用下一句的 `start`，最后一句使用 4 秒兜底，也兼容明显的毫秒值。
-插件在暂停、继续播放、拖动进度或切歌时更新 `position`、`playing` 和 `updatedAt`。写入 `active = 0` 会关闭桥接并回到 MediaRemote。
+`duration`、`position`、`start`、`end` 和单句 `duration` 默认使用秒，`updatedAt` 使用 Unix 时间戳秒，`rate` 可选且表示播放速率，缺省为 1。
+也可以写 `timeUnit = "ms"` 让所有数值时间使用毫秒，或使用明确的 `durationMs`、`positionMs`、`startMs`、`endMs`、`updatedAtMs` 和 `lineDurationMs` 字段。
+时间轴的 `end` 可以省略，应用会使用下一句的 `start`，最后一句使用 4 秒兜底。
+插件在暂停、继续播放、拖动进度或切歌时更新 `position` 和 `updatedAt`。应用以 MediaRemote 的播放状态推进时钟，文件里的 `playing` 只用于诊断，漏写一次暂停不会让歌词继续跑。
+播放过程中不要求每 30 秒刷新文件，只要 `updatedAt` 能表示最近一次位置即可。写入 `active = 0` 会关闭桥接并回到 MediaRemote。
 插件可以一次写完整时间轴，应用会在内存中按播放位置选择当前句，不要求每句都重新写文件。
 
 如果播放器插件更容易拿到原始 LRC，也可以把 `lines` 换成 `lrc` 或 `lyrics` 字符串，例如 `"[00:40.00]第一句歌词\n[00:44.20]第二句歌词"`。
@@ -85,9 +90,8 @@ Bundle ID 仍是 `ch.xxtou.hudapp`，安装会覆盖原版 TrollSpeed。
 
 所以：
 
-- “标准”层级已经在系统岛的内容之上。覆盖模式下，系统岛显示的东西只要落在胶囊范围内就会被挡住。
-- “更高”“最高”只是多盖住开孔处那块黑色遮罩。遮罩和开孔本来就是黑的，所以看不出区别，
-  反而会挡住隐私指示灯。一般用“标准”。
+- 覆盖模式下，“自动”档使用最高层级，确保系统岛内容和开孔处的遮罩都不会压住胶囊。下挂模式下，“自动”档使用标准层级。
+- “更高”“最高”会连开孔处的隐私指示灯一起盖住。覆盖模式一般保持“自动”，下挂模式一般保持“自动”。
 - 胶囊收起时缩进开孔内部（四周各留 3pt）并隐去内容：那块地方要么是物理开孔，要么被遮罩盖着，不会露出来。
   收起动画放完后整个胶囊设为透明。这一步按时间触发，不挂在 UIKit 动画的完成回调上：
   0.5.0 里封面用 `layer.speed = 0` 暂停旋转，动画块里给这个被暂停的图层加的布局动画永远走不完，
@@ -150,8 +154,8 @@ Bundle ID 仍是 `ch.xxtou.hudapp`，安装会覆盖原版 TrollSpeed。
    胶囊和系统岛上下没对齐就打开“显示校准描边”调覆盖范围。
    `island.log` 里应当有 `system island monitor: started` 和随后的 `system island frames:`；
    如果只有 `started` 而一直没有 `frames`，说明连接被系统拒绝了，这时紧凑态会是一整条宽的。
-3. 悬浮窗层级在“标准 / 更高 / 最高”之间切换后，岛立即（或自动重启后）照常显示；三档看上去应该没有区别。
-   切到“更高”或“最高”时，开孔里的隐私指示灯（录音、定位时的小圆点）会被盖住，可以用来确认层级确实换了。
+3. 悬浮窗层级在“自动 / 更高 / 最高”之间切换后，岛立即（或自动重启后）照常显示。
+   覆盖模式的“自动”应直接盖住系统岛；切到“更高”或“最高”时，开孔里的隐私指示灯（录音、定位时的小圆点）会被盖住，可以用来确认层级确实换了。
 4. 长歌词：开头能看到第一个字，结尾能看到最后一个字，滚动跟着填色走；暂停时停住。
 5. `/var/mobile/Library/IslandKit/island.log` 里的 `geometry` 一行应该是 `source=table`，
    `windowLevel applied=` 一行是当前层级对应的数值。
@@ -170,7 +174,7 @@ Bundle ID 仍是 `ch.xxtou.hudapp`，安装会覆盖原版 TrollSpeed。
 `lyricEffect`（0 无 / 1 填色 / 2 淡入），`lyricFontSize`，`spinSeconds` `notifDuration`（秒），
 `notifApps`（bundle ID 数组），`accent` `lyricColor` `titleColor` `ringColor` `notifTitleColor` `notifMessageColor`（十六进制颜色），
 `lyricColorMode` `titleColorMode` `ringColorMode`（0 强调色 / 1 封面 / 2 自定义 / 3 白色，3 只用于歌名），
-`placement`（0 岛下方 / 1 覆盖岛），`transitionStyle`（0–4），`windowLevelBoost`（0–2，立即生效），
+`placement`（0 岛下方 / 1 覆盖岛），`transitionStyle`（0–4），`windowLevelBoost`（0 自动 / 1 更高 / 2 最高，立即生效；覆盖模式的自动档使用最高层级），
 `coverExtraWidth` `coverExtraHeight` `coverOffsetY`（覆盖范围微调），`coverCompactSide`（可选，设置界面不管），
 `calibrateUntil`（Unix 时间，校准描边显示到什么时候），
 `islandTop` `cutoutWidth` `cutoutHeight` `belowTop`（可选，覆盖自动识别的结果）。

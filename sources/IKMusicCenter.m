@@ -1,6 +1,7 @@
 #import "IKMusicCenter.h"
 #import "MediaRemote.h"
 #import "IKPrefs.h"
+#import <objc/message.h>
 #include <math.h>
 
 NSString *const IKMusicDidChangeNotification = @"IKMusicDidChangeNotification";
@@ -12,6 +13,7 @@ NSString *const IKMusicDidChangeNotification = @"IKMusicDidChangeNotification";
 @property (nonatomic) double mediaDuration;
 @property (nonatomic) double mediaElapsed;
 @property (nonatomic) BOOL mediaIsPlaying;
+@property (nonatomic, copy) NSString *mediaApplicationID;
 @property (nonatomic, strong) NSDate *mediaTimestamp;
 @property (nonatomic, copy) NSString *title;
 @property (nonatomic, copy) NSString *artist;
@@ -50,20 +52,104 @@ static double IKBridgeNumber(id value, double fallback) {
     return isfinite(number) ? number : fallback;
 }
 
-static double IKBridgeTimestamp(id value, double fallback) {
-    double number = IKBridgeNumber(value, fallback);
-    // 插件协议使用秒。兼容部分播放器直接写入的毫秒时间戳。
-    return number > 100000 ? number / 1000.0 : number;
+static BOOL IKBridgeUnitIsMilliseconds(id unit) {
+    if ([unit isKindOfClass:[NSNumber class]]) return [unit boolValue];
+    if (![unit isKindOfClass:[NSString class]]) return NO;
+    NSString *normalized = [(NSString *)unit lowercaseString];
+    return [normalized isEqualToString:@"ms"]
+        || [normalized isEqualToString:@"millisecond"]
+        || [normalized isEqualToString:@"milliseconds"];
 }
 
-static double IKBridgeUnixTimestamp(id value, double fallback) {
+static BOOL IKBridgeMillisecondsForKey(NSString *key, NSDictionary *context, BOOL defaultValue) {
+    NSString *normalized = [key.lowercaseString stringByReplacingOccurrencesOfString:@"_" withString:@""];
+    if ([normalized hasSuffix:@"ms"] || [normalized hasSuffix:@"millisecond"]
+        || [normalized hasSuffix:@"milliseconds"]) return YES;
+    if (context[@"timeUnit"] != nil) return IKBridgeUnitIsMilliseconds(context[@"timeUnit"]);
+    return defaultValue;
+}
+
+static double IKBridgeTimeValue(id value, NSString *key, NSDictionary *context,
+                                BOOL defaultMilliseconds, double fallback) {
     double number = IKBridgeNumber(value, fallback);
-    // updatedAt 是 Unix 时间戳，秒值约为 1e9，只有明显更大的 1e12 量级才是毫秒。
-    return number > 100000000000.0 ? number / 1000.0 : number;
+    if (IKBridgeMillisecondsForKey(key, context, defaultMilliseconds)) number /= 1000.0;
+    return number;
+}
+
+static id IKBridgeFirstValue(NSDictionary *dict, NSArray<NSString *> *keys, NSString **keyOut) {
+    for (NSString *key in keys) {
+        id value = dict[key];
+        if (value != nil) {
+            if (keyOut) *keyOut = key;
+            return value;
+        }
+    }
+    if (keyOut) *keyOut = nil;
+    return nil;
+}
+
+static double IKBridgeDictionaryTime(NSDictionary *dict, NSArray<NSString *> *keys,
+                                     BOOL defaultMilliseconds, double fallback) {
+    NSString *key = nil;
+    id value = IKBridgeFirstValue(dict, keys, &key);
+    return key ? IKBridgeTimeValue(value, key, dict, defaultMilliseconds, fallback) : fallback;
+}
+
+static double IKBridgeUnixTimestampValue(id value, NSString *key, NSDictionary *context,
+                                         BOOL defaultMilliseconds, double fallback) {
+    double number = IKBridgeTimeValue(value, key, context, defaultMilliseconds, fallback);
+    // 兼容没有显式单位、但直接写入 Unix 毫秒时间戳的旧插件。
+    if (!IKBridgeMillisecondsForKey(key, context, defaultMilliseconds) && number > 100000000000.0) {
+        number /= 1000.0;
+    }
+    return number;
+}
+
+static double IKBridgeUpdatedAt(NSDictionary *dict, double fallback) {
+    NSString *key = nil;
+    id value = IKBridgeFirstValue(dict, @[@"updatedAtMs", @"updatedAt"], &key);
+    return key ? IKBridgeUnixTimestampValue(value, key, dict, NO, fallback) : fallback;
 }
 
 static double IKBridgeWallClockNow(void) {
     return [[NSDate date] timeIntervalSince1970];
+}
+
+static NSString *IKPlayerLyricsPath(NSString *bundleID) {
+    if (bundleID.length == 0) return nil;
+    Class proxyClass = NSClassFromString(@"LSApplicationProxy");
+    SEL makeProxy = NSSelectorFromString(@"applicationProxyForIdentifier:");
+    SEL containerSelector = NSSelectorFromString(@"dataContainerURL");
+    if (!proxyClass || ![proxyClass respondsToSelector:makeProxy]) return nil;
+
+    id proxy = nil;
+    @try {
+        proxy = ((id (*)(id, SEL, id))objc_msgSend)(proxyClass, makeProxy, bundleID);
+        NSURL *container = proxy && [proxy respondsToSelector:containerSelector]
+            ? ((id (*)(id, SEL))objc_msgSend)(proxy, containerSelector) : nil;
+        if (![container isKindOfClass:[NSURL class]] || !container.isFileURL) return nil;
+        return [[container.path stringByAppendingPathComponent:@"Library/IslandKit"]
+                stringByAppendingPathComponent:@"lyrics.plist"];
+    } @catch (__unused NSException *e) {
+        return nil;
+    }
+}
+
+static NSDictionary *IKReadLyricsBridge(NSString *bundleID, NSString **pathOut) {
+    NSMutableArray<NSString *> *paths = [NSMutableArray array];
+    NSString *playerPath = IKPlayerLyricsPath(bundleID);
+    if (playerPath.length) [paths addObject:playerPath];
+    [paths addObject:[IKDataDir stringByAppendingPathComponent:@"lyrics.plist"]];
+
+    NSFileManager *fm = [NSFileManager defaultManager];
+    for (NSString *path in paths) {
+        if (![fm fileExistsAtPath:path]) continue;
+        if (pathOut) *pathOut = path;
+        // 插件必须用原子替换写文件，避免悬浮进程读到半个 plist。
+        return [NSDictionary dictionaryWithContentsOfFile:path];
+    }
+    if (pathOut) *pathOut = nil;
+    return nil;
 }
 
 static double IKBridgeLRCFraction(NSString *fraction) {
@@ -168,8 +254,8 @@ static void IKLyricsBridgeChanged(CFNotificationCenterRef center, void *observer
 }
 
 - (BOOL)refreshLyricsBridge {
-    NSString *path = [IKDataDir stringByAppendingPathComponent:@"lyrics.plist"];
-    NSDictionary *data = [NSDictionary dictionaryWithContentsOfFile:path];
+    NSString *path = nil;
+    NSDictionary *data = IKReadLyricsBridge(self.mediaApplicationID, &path);
     BOOL oldActive = self.lyricsBridgeActive;
     NSString *oldLyric = self.bridgeLyric;
     if (![data isKindOfClass:[NSDictionary class]] || ([data[@"active"] respondsToSelector:@selector(boolValue)] && ![data[@"active"] boolValue])) {
@@ -196,30 +282,20 @@ static void IKLyricsBridgeChanged(CFNotificationCenterRef center, void *observer
     NSString *title = IKBridgeString(data[@"title"] ?: data[@"trackTitle"], 256)
         ?: IKBridgeString(self.mediaTitle, 256);
     NSString *artist = IKBridgeString(data[@"artist"], 256) ?: IKBridgeString(self.mediaArtist, 256);
-    double duration = IKBridgeTimestamp(data[@"duration"], self.mediaDuration);
+    BOOL defaultMilliseconds = IKBridgeUnitIsMilliseconds(data[@"timeUnit"]);
+    double duration = IKBridgeDictionaryTime(data, @[@"durationMs", @"duration"], defaultMilliseconds, self.mediaDuration);
     if (duration < 0) duration = 0;
-    BOOL playing = data[@"playing"] ? [data[@"playing"] boolValue] : self.mediaIsPlaying;
+    // 播放器的 MediaRemote 状态是实际时钟的唯一来源。文件里的 playing 只用于诊断，
+    // 这样插件偶尔漏写暂停时，悬浮窗不会继续推进或停在错误位置。
+    BOOL filePlaying = data[@"playing"] ? [data[@"playing"] boolValue] : self.mediaIsPlaying;
+    BOOL playing = self.mediaIsPlaying;
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
     double wallNow = IKBridgeWallClockNow();
-    double updatedAt = IKBridgeUnixTimestamp(data[@"updatedAt"], 0);
+    double updatedAt = IKBridgeUpdatedAt(data, 0);
     if (updatedAt <= 0) updatedAt = wallNow;
-    // 播放中的桥接文件如果超过 30 秒没有被插件刷新，回退到 MediaRemote，避免显示旧歌词。
-    if (playing && [[NSDate date] timeIntervalSince1970] - updatedAt > 30) {
-        self.lyricsBridgeActive = NO;
-        self.bridgeLyric = nil;
-        self.bridgeNextLyric = nil;
-        self.bridgeTitle = nil;
-        self.title = self.mediaTitle;
-        self.artist = self.mediaArtist;
-        self.album = self.mediaAlbum;
-        self.duration = self.mediaDuration;
-        self.elapsed = self.mediaElapsed;
-        self.isPlaying = self.mediaIsPlaying;
-        self.timestamp = self.mediaTimestamp;
-        return oldActive || oldLyric.length > 0;
-    }
 
-    double position = IKBridgeTimestamp(data[@"position"] ?: data[@"elapsed"], self.mediaElapsed);
+    double position = IKBridgeDictionaryTime(data, @[@"positionMs", @"position", @"elapsedMs", @"elapsed"],
+                                              defaultMilliseconds, self.mediaElapsed);
     double rate = IKBridgeNumber(data[@"rate"] ?: data[@"playbackRate"], 1.0);
     rate = MAX(0, MIN(4, rate));
     if (playing) position += MAX(0, wallNow - updatedAt) * rate;
@@ -227,13 +303,17 @@ static void IKLyricsBridgeChanged(CFNotificationCenterRef center, void *observer
 
     NSString *current = nil;
     NSString *next = nil;
-    double lineStart = IKBridgeTimestamp(data[@"currentStart"], position);
-    double lineEnd = IKBridgeTimestamp(data[@"currentEnd"], 0);
+    double lineStart = IKBridgeDictionaryTime(data, @[@"currentStartMs", @"currentStart"],
+                                               defaultMilliseconds, position);
+    double lineEnd = IKBridgeDictionaryTime(data, @[@"currentEndMs", @"currentEnd"],
+                                             defaultMilliseconds, 0);
     id rawLines = data[@"lines"] ?: data[@"timeline"] ?: data[@"lyricsLines"];
     NSArray *lines = [rawLines isKindOfClass:[NSArray class]] ? rawLines : nil;
+    BOOL linesFromLRC = NO;
     if (!lines) {
         NSString *lrc = IKBridgeString(data[@"lrc"] ?: data[@"lyrics"], 200000);
         lines = IKBridgeLinesFromLRC(lrc);
+        linesFromLRC = lines != nil;
     }
     NSMutableArray *ordered = [NSMutableArray array];
     if (lines.count > 0 && lines.count <= 2000) {
@@ -241,12 +321,22 @@ static void IKLyricsBridgeChanged(CFNotificationCenterRef center, void *observer
             if (![item isKindOfClass:[NSDictionary class]]) continue;
             NSString *text = IKBridgeString(item[@"text"] ?: item[@"lyric"] ?: item[@"line"], 512);
             if (!text) continue;
-            double start = IKBridgeTimestamp(item[@"start"] ?: item[@"time"]
-                                             ?: item[@"timestamp"] ?: item[@"begin"], -1);
+            NSString *startKey = nil;
+            id startValue = IKBridgeFirstValue(item, @[@"startMs", @"start", @"timeMs", @"time",
+                                                        @"timestampMs", @"timestamp", @"beginMs", @"begin"], &startKey);
+            BOOL itemMilliseconds = linesFromLRC
+                ? NO
+                : (item[@"timeUnit"] != nil ? IKBridgeUnitIsMilliseconds(item[@"timeUnit"]) : defaultMilliseconds);
+            double start = startKey ? IKBridgeTimeValue(startValue, startKey, item, itemMilliseconds, -1) : -1;
             if (start < 0) continue;
-            double end = IKBridgeTimestamp(item[@"end"] ?: item[@"endTime"], -1);
+            NSString *endKey = nil;
+            id endValue = IKBridgeFirstValue(item, @[@"endMs", @"end", @"endTimeMs", @"endTime"], &endKey);
+            double end = endKey ? IKBridgeTimeValue(endValue, endKey, item, itemMilliseconds, -1) : -1;
             if (end < 0) {
-                double lineDuration = IKBridgeTimestamp(item[@"duration"] ?: item[@"durationMs"], -1);
+                NSString *durationKey = nil;
+                id durationValue = IKBridgeFirstValue(item, @[@"durationMs", @"duration"], &durationKey);
+                double lineDuration = durationKey
+                    ? IKBridgeTimeValue(durationValue, durationKey, item, itemMilliseconds, -1) : -1;
                 end = lineDuration > 0 ? start + lineDuration : HUGE_VAL;
             }
             [ordered addObject:@{ @"text": text, @"start": @(start), @"end": @(end) }];
@@ -279,7 +369,9 @@ static void IKLyricsBridgeChanged(CFNotificationCenterRef center, void *observer
     if (!current) {
         current = IKBridgeString(data[@"current"] ?: data[@"lyric"], 512);
         next = IKBridgeString(data[@"next"], 512);
-        if (lineEnd <= lineStart) lineEnd = lineStart + MAX(1.5, IKBridgeNumber(data[@"lineDuration"], 4));
+        double lineDuration = IKBridgeDictionaryTime(data, @[@"lineDurationMs", @"lineDuration"],
+                                                      defaultMilliseconds, 4);
+        if (lineEnd <= lineStart) lineEnd = lineStart + MAX(1.5, lineDuration);
     }
     if (!title || !current) {
         self.lyricsBridgeActive = NO;
@@ -322,9 +414,10 @@ static void IKLyricsBridgeChanged(CFNotificationCenterRef center, void *observer
     self.isPlaying = playing;
     self.timestamp = [NSDate date];
     if (!oldActive || ![oldLyric isEqualToString:current]) {
-        [IKPrefs log:[NSString stringWithFormat:@"lyrics bridge active title.len=%lu lines=%lu position=%.2f line.len=%lu",
+        [IKPrefs log:[NSString stringWithFormat:@"lyrics bridge active app=%@ source=%@ title.len=%lu lines=%lu position=%.2f line.len=%lu filePlaying=%d mediaPlaying=%d",
+                      self.mediaApplicationID ?: @"-", path.length && [path hasPrefix:IKDataDir] ? @"global" : @"player",
                       (unsigned long)title.length, (unsigned long)self.bridgeLines.count,
-                      position, (unsigned long)current.length]];
+                      position, (unsigned long)current.length, filePlaying, playing]];
     }
     return !oldActive || ![oldLyric isEqualToString:current];
 }
@@ -370,19 +463,22 @@ static void IKLyricsBridgeChanged(CFNotificationCenterRef center, void *observer
             self.artworkLength = art.length;
         }
 
-        MRMediaRemoteGetNowPlayingApplicationIsPlaying(dispatch_get_main_queue(), ^(Boolean playing) {
-            self.mediaIsPlaying = playing;
-            [self refreshLyricsBridge];
-            if (!self.lyricsBridgeActive) {
-                self.title = self.mediaTitle;
-                self.artist = self.mediaArtist;
-                self.album = self.mediaAlbum;
-                self.duration = self.mediaDuration;
-                self.elapsed = self.mediaElapsed;
-                self.isPlaying = self.mediaIsPlaying;
-                self.timestamp = self.mediaTimestamp;
-            }
-            [[NSNotificationCenter defaultCenter] postNotificationName:IKMusicDidChangeNotification object:self];
+        MRMediaRemoteGetNowPlayingApplicationDisplayID(dispatch_get_main_queue(), ^(NSString *displayID) {
+            self.mediaApplicationID = [displayID isKindOfClass:[NSString class]] ? displayID : nil;
+            MRMediaRemoteGetNowPlayingApplicationIsPlaying(dispatch_get_main_queue(), ^(Boolean playing) {
+                self.mediaIsPlaying = playing;
+                [self refreshLyricsBridge];
+                if (!self.lyricsBridgeActive) {
+                    self.title = self.mediaTitle;
+                    self.artist = self.mediaArtist;
+                    self.album = self.mediaAlbum;
+                    self.duration = self.mediaDuration;
+                    self.elapsed = self.mediaElapsed;
+                    self.isPlaying = self.mediaIsPlaying;
+                    self.timestamp = self.mediaTimestamp;
+                }
+                [[NSNotificationCenter defaultCenter] postNotificationName:IKMusicDidChangeNotification object:self];
+            });
         });
     });
 }

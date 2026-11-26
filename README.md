@@ -44,13 +44,13 @@ IK_SUFFIX=IslandKit-0.6.1-lyrics sh build.sh
 
 1. 打开 App，打开右上角的运行开关。
 2. 在“应用通知”里勾选要进岛的应用。想只看岛上的显示，到 系统设置 → 通知 把这些应用的“横幅”关掉。
-3. 歌词可以使用音乐 App 的“蓝牙歌词”或“车载歌词”上报。要精确同步整首歌词，使用 TrollFools 注入插件，把时间轴写入 `/var/mobile/Library/IslandKit/lyrics.plist`，格式见 [ISLANDKIT.md](ISLANDKIT.md)。
+3. 歌词可以使用音乐 App 的“蓝牙歌词”或“车载歌词”上报。要精确同步整首歌词，使用 TrollFools 注入插件，把时间轴原子写入目标播放器容器里的 `Library/IslandKit/lyrics.plist`，格式见 [ISLANDKIT.md](ISLANDKIT.md)。悬浮进程会按当前播放应用读取，也兼容旧的全局路径。
 
 ## 已知限制
 
 - 无法关闭系统横幅，也无法隐藏系统自己的灵动岛。
 - 锁屏时不显示；只支持竖屏。
-- 没有歌词桥接插件时，歌词取决于音乐 App 是否上报，系统接口通常只能拿到当前这一句，顺序和时长无法保证。
+- 没有歌词桥接插件时，歌词取决于音乐 App 是否上报，系统接口通常只能拿到当前这一句，顺序和时长无法保证。精确歌词桥接需要目标音乐 App 的独立 TrollFools 插件。
 - 微信通知的头像依赖系统通知提供的 `intents-remote-image-proxy`。应用会异步尝试解码代理内容，系统没有提供可读图片时会退回应用图标。
 
 更多实现细节见 [ISLANDKIT.md](ISLANDKIT.md)。

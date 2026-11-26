@@ -48,7 +48,8 @@
 
 // 过渡动画。0 回弹下落；1 柔和滑入；2 淡入；3 缩放弹出；4 果冻
 @property (nonatomic) NSInteger transitionStyle;
-// 悬浮窗层级。0 标准；1 更高；2 最高。改动后悬浮进程会立即按新层级重新挂载窗口
+// 悬浮窗层级。0 自动（覆盖模式用最高、下挂模式用标准）；1 更高；2 最高。
+// 改动后悬浮进程会立即按新层级重新挂载窗口
 @property (nonatomic) NSInteger windowLevelBoost;
 + (double)windowLevelFromFile;
 

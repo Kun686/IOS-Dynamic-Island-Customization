@@ -17,8 +17,9 @@ extern NSString *const IKMusicDidChangeNotification;
 @property (nonatomic, readonly) BOOL hasTrack;
 @property (nonatomic, readonly) double duration;
 
-// 可选的 TrollFools 歌词桥接。播放器插件把时间轴写入
-// /var/mobile/Library/IslandKit/lyrics.plist，再发送 IKLyricsChangedDarwin。
+// 可选的 TrollFools 歌词桥接。播放器插件优先把时间轴原子写入自己容器的
+// Library/IslandKit/lyrics.plist，再发送 IKLyricsChangedDarwin。仍兼容
+// /var/mobile/Library/IslandKit/lyrics.plist 这个全局回退路径。
 // 没有有效桥接数据时，控制器继续使用 MediaRemote。
 @property (nonatomic, readonly) BOOL lyricsBridgeActive;
 @property (nonatomic, readonly, copy) NSString *bridgeLyric;

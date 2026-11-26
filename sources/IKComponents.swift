@@ -289,7 +289,10 @@ struct TransitionStage: View {
         .padding(.top, 10)
         .background(Color.ikStage)
         .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-        .onChange(of: trigger) { _ in play() }
+        .task(id: trigger) {
+            guard trigger != 0 else { return }
+            play()
+        }
         .accessibilityHidden(true)
     }
 }

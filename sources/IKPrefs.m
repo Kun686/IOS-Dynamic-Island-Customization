@@ -95,6 +95,10 @@ static UIColor *IKColorFromHex(NSString *hex, UIColor *fallback) {
 + (double)windowLevelFromFile {
     NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:IKPrefsPath];
     NSInteger boost = [d[@"windowLevelBoost"] integerValue];
+    // 覆盖系统岛时，自动档必须压过系统岛的遮罩。用户在真机上确认过，
+    // 标准层级虽然高于系统岛内容，但启动时仍可能被系统岛场景压住。
+    BOOL coveringIsland = [d[@"placement"] integerValue] != 0;
+    if (coveringIsland && boost == 0) return IKWindowLevelHighest;
     if (boost == 1) return IKWindowLevelHigher;
     if (boost >= 2) return IKWindowLevelHighest;
     return IKWindowLevelStandard;

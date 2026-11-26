@@ -8,7 +8,7 @@ struct Settings {
     var spin = true
     var pauseStops = true
     var transitionStyle = 0    // 0 回弹下落 / 1 柔和滑入 / 2 淡入 / 3 缩放弹出 / 4 果冻
-    var windowLevelBoost = 0   // 0 标准 / 1 更高 / 2 最高
+    var windowLevelBoost = 0   // 0 自动（覆盖模式最高、下挂模式标准）/ 1 更高 / 2 最高
     var placement = 0          // 0 岛下方 / 1 覆盖岛
     var coverExtraWidth = 3.0  // 覆盖模式：胶囊比开孔多出来的宽度（两侧合计）
     var coverExtraHeight = 3.0 // 覆盖模式：胶囊比开孔多出来的高度（上下合计）

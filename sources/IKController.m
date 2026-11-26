@@ -392,7 +392,7 @@ static BOOL IKSame(NSString *a, NSString *b) {
     self.notifBundle = bundleID;
     self.notifAppName = appName;
     self.notifTitle = title.length ? title : appName;
-    self.notifMessage = message;
+    self.notifMessage = message ?: @"";
     UIImage *icon = avatar;
     if (!icon && [UIImage respondsToSelector:@selector(_applicationIconImageForBundleIdentifier:format:scale:)]) {
         icon = [UIImage _applicationIconImageForBundleIdentifier:bundleID format:2 scale:[UIScreen mainScreen].scale];
@@ -418,7 +418,7 @@ static BOOL IKSame(NSString *a, NSString *b) {
     if (token != 0 && token != self.notifToken) return;
     if (!avatar || !self.notifActive || ![self.notifBundle isEqualToString:bundleID]
         || ![self.notifTitle isEqualToString:(title.length ? title : self.notifAppName)]
-        || ![self.notifMessage isEqualToString:message]) return;
+        || ![(self.notifMessage ?: @"") isEqualToString:(message ?: @"")]) return;
     [self.island setNotifIcon:avatar appName:self.notifAppName round:YES];
 }
 

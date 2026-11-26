@@ -51,8 +51,6 @@
 		CC654E3E2DABD9C200D54F83 /* InfoPlist.strings in Resources */ = {isa = PBXBuildFile; fileRef = CC711D8E2B5BFD50007235A6 /* InfoPlist.strings */; };
 		CC654E3F2DABD9C200D54F83 /* Settings.bundle in Resources */ = {isa = PBXBuildFile; fileRef = CC2A772F2B6AADB400796650 /* Settings.bundle */; };
 		CC654E402DABD9C200D54F83 /* Localizable.strings in Resources */ = {isa = PBXBuildFile; fileRef = CC711D872B5BFCC4007235A6 /* Localizable.strings */; };
-		CC654E412DABD9C200D54F83 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = CC711D102B5BF551007235A6 /* Assets.xcassets */; };
-		CC711D112B5BF551007235A6 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = CC711D102B5BF551007235A6 /* Assets.xcassets */; };
 		CC711D4A2B5BF5C6007235A6 /* HUDHelper.mm in Sources */ = {isa = PBXBuildFile; fileRef = CC711D1E2B5BF5C6007235A6 /* HUDHelper.mm */; };
 		CC711D4B2B5BF5C6007235A6 /* RootViewController.mm in Sources */ = {isa = PBXBuildFile; fileRef = CC711D1F2B5BF5C6007235A6 /* RootViewController.mm */; };
 		CC711D4C2B5BF5C6007235A6 /* HUDMainWindow.mm in Sources */ = {isa = PBXBuildFile; fileRef = CC711D202B5BF5C6007235A6 /* HUDMainWindow.mm */; };
@@ -535,7 +533,6 @@
 				CC654E3E2DABD9C200D54F83 /* InfoPlist.strings in Resources */,
 				CC654E3F2DABD9C200D54F83 /* Settings.bundle in Resources */,
 				CC654E402DABD9C200D54F83 /* Localizable.strings in Resources */,
-				CC654E412DABD9C200D54F83 /* Assets.xcassets in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -547,7 +544,6 @@
 				CC711D8C2B5BFD50007235A6 /* InfoPlist.strings in Resources */,
 				CC2A77302B6AADB400796650 /* Settings.bundle in Resources */,
 				CC711D852B5BFCC4007235A6 /* Localizable.strings in Resources */,
-				CC711D112B5BF551007235A6 /* Assets.xcassets in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
