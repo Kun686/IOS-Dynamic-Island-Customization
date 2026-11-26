@@ -262,7 +262,7 @@ struct NotifyView: View {
             .background(Color.ikCard)
             .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
 
-            Caption("系统横幅无法由本应用关闭。想只看岛上的显示，请到 系统设置 → 通知 里把对应应用的“横幅”关掉。覆盖模式下长按自定义胶囊可在歌词态和紧凑态之间切换。")
+            Caption("系统横幅无法由本应用关闭。想只看岛上的显示，请到 系统设置 → 通知 里把对应应用的“横幅”关掉。聊天类通知会优先显示发送者头像。")
         }
         .task {
             let list = await Task.detached { AppList.load() }.value
@@ -293,25 +293,21 @@ struct LyricView: View {
             Card {
                 Caption("行数")
                 Segmented(value: $store.s.lyricLines, options: [(1, "单行"), (2, "双行")], accent: accent)
-                Caption("单行显示当前这句歌词；双行第一行显示歌名，第二行显示当前歌词。")
+                Caption("单行只显示当前这句歌词；双行第一行显示歌名，第二行显示当前歌词。")
             }
 
             Card {
                 Caption("动效")
                 Segmented(value: $store.s.lyricEffect, options: [(1, "逐行填色"), (2, "淡入"), (0, "无")], accent: accent)
-                HStack {
-                    Caption("字号")
-                    Spacer()
-                    Text("\(Int(store.s.lyricFontSize))").font(.system(size: 13))
-                }
-                Slider(value: $store.s.lyricFontSize, in: 13...18, step: 1) { Text("字号") }
-                    .frame(minHeight: 44)
-                ColorPicker("歌名颜色", selection: Binding(
-                    get: { Color(hex: store.s.songTitleColor) },
-                    set: { store.s.songTitleColor = $0.hexString }), supportsOpacity: false)
-                    .font(.system(size: 15))
-                    .frame(minHeight: 44)
+                Caption("动效只作用在歌词这一行，歌名不跟着变。比胶囊宽的歌词不截断，会跟着进度向左滚动。")
+                SliderRow(title: "字号", value: $store.s.lyricFontSize, range: 13...18, step: 1)
+            }
+
+            Card {
                 ColorModeRow(title: "歌词颜色", mode: $store.s.lyricColorMode, hex: $store.s.lyricColor, accent: accent)
+                ColorModeRow(title: "歌名颜色", mode: $store.s.titleColorMode, hex: $store.s.titleColor, accent: accent,
+                             allowsDefault: true)
+                Caption("歌名和歌词各用各的颜色。歌名显示在双行的第一行；播放器没有上报歌词时，单行也显示歌名。")
             }
         }
     }
@@ -351,40 +347,60 @@ struct CoverView: View {
 @available(iOS 16.0, *)
 struct AppearanceView: View {
     @EnvironmentObject var store: Store
-    @State private var demoRun = 0
+    @State private var demoTick = 0
+    @State private var calibrating = false
 
     private let styles: [(Int, String, String)] = [
-        (0, "回弹下落", "从岛背后落下，轻微回弹"),
-        (1, "柔和滑入", "从岛背后平滑滑出，不回弹"),
+        (0, "回弹下落", "从岛里落下，轻微回弹"),
+        (1, "柔和滑入", "从岛里平滑滑出，不回弹"),
         (2, "淡入", "原地淡入淡出"),
         (3, "缩放弹出", "原地由小变大"),
         (4, "果冻", "下落后明显晃动几下"),
     ]
+    private let renew = Timer.publish(every: 30, on: .main, in: .common).autoconnect()
+
+    // 悬浮进程换层级要先向 SpringBoard 注销窗口再重新登记。系统里有注销接口时它自己就能即时完成；
+    // 没有的话（目前见过的 iOS 14.2、16.6、18.7 都有）由这里把悬浮进程重启一遍，效果一样只是慢一点
+    private let liveLevel: Bool = (NSClassFromString("SBSAccessibilityWindowHostingController") as? NSObject.Type)?
+        .instancesRespond(to: NSSelectorFromString("unregisterWindowWithContextID:")) ?? false
+
+    private func restartHUD() {
+        guard IsHUDEnabled() else { return }
+        SetHUDEnabled(false)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { SetHUDEnabled(true) }
+    }
+
+    private func setCalibrating(_ on: Bool) {
+        calibrating = on
+        store.setCalibrating(on)
+    }
 
     var body: some View {
         let accent = Color(hex: store.s.accent)
         Page(title: "外观与动画") {
             Card {
                 Caption("过渡动画")
-                TransitionDemo(style: store.s.transitionStyle, settings: store.s, run: demoRun)
-                    .frame(height: 110)
-                    .background(Color.ikStage)
-                    .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
-                Caption("点选任一项可预览一次出现、停留和收起。")
+                TransitionStage(style: store.s.transitionStyle, trigger: demoTick, accent: accent)
                 ForEach(styles.indices, id: \.self) { i in
                     let item = styles[i]
                     let on = store.s.transitionStyle == item.0
                     Button {
+                        // 选中并马上演示：这里播一遍，悬浮窗在运行时屏幕顶部的岛也播一遍
                         store.s.transitionStyle = item.0
-                        demoRun += 1
+                        demoTick += 1
+                        store.demoTransition()
                     } label: {
-                        HStack {
+                        HStack(spacing: 12) {
+                            Image(systemName: on ? "checkmark.circle.fill" : "circle")
+                                .foregroundColor(on ? accent : .ikMuted)
+                                .accessibilityHidden(true)
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(item.1).font(.system(size: 16, weight: .medium))
                                 Text(item.2).font(.system(size: 13)).foregroundColor(.ikMuted)
                             }
                             Spacer()
-                            Image(systemName: on ? "checkmark.circle.fill" : "circle")
+                            Image(systemName: "play.circle")
+                                .font(.system(size: 20))
                                 .foregroundColor(on ? accent : .ikMuted)
                                 .accessibilityHidden(true)
                         }
@@ -393,7 +409,9 @@ struct AppearanceView: View {
                     }
                     .buttonStyle(.plain)
                     .accessibilityAddTraits(on ? .isSelected : [])
+                    .accessibilityHint("选中并演示")
                 }
+                Caption("点任意一项会选中它并演示一遍；再点一次可以重播。悬浮窗在运行时，屏幕顶部的岛会同步演示。")
             }
 
             Card {
@@ -401,13 +419,35 @@ struct AppearanceView: View {
                 Segmented(value: $store.s.placement, options: [(0, "系统岛下方"), (1, "覆盖系统岛")], accent: accent)
                 Caption(store.s.placement == 0
                         ? "系统岛照常显示，歌词和通知挂在它下面，不遮挡状态栏时间。"
-                        : "盖在系统岛上，位置和大小按机型自动识别。长按自定义胶囊可切换歌词和紧凑态，通知使用完整卡片显示。")
+                        : "盖在系统岛上，把系统岛自己显示的内容（专辑图、波形等）挡住。收起时整个缩回开孔里面。")
+            }
+
+            if store.s.placement == 1 {
+                Card {
+                    Caption("覆盖范围")
+                    SliderRow(title: "比开孔宽出", value: $store.s.coverExtraWidth, range: -6...40, step: 0.5, format: "%.1f")
+                    SliderRow(title: "比开孔高出", value: $store.s.coverExtraHeight, range: -4...16, step: 0.5, format: "%.1f")
+                    SliderRow(title: "上下位置", value: $store.s.coverOffsetY, range: -8...8, step: 0.5, format: "%.1f")
+                    Toggle("显示校准描边", isOn: Binding(get: { calibrating }, set: { setCalibrating($0) }))
+                        .font(.system(size: 15))
+                        .frame(minHeight: 44)
+                    Caption("打开后，没有歌曲和通知时会在屏幕顶部用红线画出胶囊在开孔处的范围，本页顶部同时变成白底，方便对着真正的系统岛调整：红线刚好把黑色的系统岛包住就合适。离开本页或 90 秒后自动关闭。")
+                    Caption("左右方向不用手动调：悬浮窗会读取系统岛此刻的实际大小，把胶囊加宽到刚好盖住它；读不到时按系统岛紧凑显示最宽的情况留宽度。系统岛展开（长按、来电等）时胶囊会先让开，等它收回去再出现。")
+                    Button("恢复默认") {
+                        store.s.coverExtraWidth = 3
+                        store.s.coverExtraHeight = 3
+                        store.s.coverOffsetY = 0
+                    }
+                    .font(.system(size: 15, weight: .medium))
+                    .frame(minHeight: 44)
+                }
             }
 
             Card {
-                Caption("悬浮窗层级（实验）")
-                Segmented(value: $store.s.windowLevelBoost, options: [(0, "自动"), (1, "更高"), (2, "最高")], accent: accent)
-                Caption("覆盖模式的“自动”会使用系统可用的最高层级。切换后只在层级真正变化时重新登记窗口。")
+                Caption("悬浮窗层级")
+                Segmented(value: $store.s.windowLevelBoost, options: [(0, "标准"), (1, "更高"), (2, "最高")], accent: accent)
+                Caption((liveLevel ? "改动立即生效。" : "改动后会自动重启悬浮窗，大约 1 秒。")
+                        + "标准层级已经在系统岛的内容之上，只低于系统在开孔处画的黑色遮罩和隐私指示灯；“更高”“最高”会连这块遮罩一起盖住。遮罩和开孔本来就是黑的，所以通常看不出区别，一般保持“标准”。如果切换后岛没有再出现，到首页把运行开关关掉再打开。")
             }
 
             Card {
@@ -419,6 +459,23 @@ struct AppearanceView: View {
                     .frame(minHeight: 44)
             }
         }
+        // 校准时把导航栏（一直延伸到屏幕顶端）换成白底，黑色的系统岛才看得清
+        .toolbarBackground(calibrating ? Color.white : Color.ikGround, for: .navigationBar)
+        .toolbarBackground(calibrating ? .visible : .automatic, for: .navigationBar)
+        .toolbarColorScheme(calibrating ? .light : .dark, for: .navigationBar)
+        .onReceive(renew) { _ in
+            if calibrating { store.setCalibrating(true) }
+        }
+        .onChange(of: store.s.windowLevelBoost) { _ in
+            if !liveLevel { restartHUD() }
+        }
+        .onChange(of: store.s.placement) { value in
+            if value != 1 && calibrating { setCalibrating(false) }
+        }
+        .onAppear { demoTick += 1 }
+        .onDisappear {
+            if calibrating { setCalibrating(false) }
+        }
     }
 }
 
@@ -429,22 +486,14 @@ struct AboutView: View {
     @State private var copied = false
     private let wechat = "-6-6-6666"
 
-    private var buildLabel: String {
-        let info = Bundle.main.infoDictionary
-        let version = info?["CFBundleShortVersionString"] as? String ?? "2.0"
-        let build = info?["CFBundleVersion"] as? String ?? "13"
-        return "\(version) (\(build))"
-    }
-
     var body: some View {
         Page(title: "关于") {
             Card {
                 Text("亦辰").font(.system(size: 22, weight: .bold))
-                Caption("开发者")
+                Caption("开发者 · 灵动岛美化 0.6.1")
                 Text("灵动岛美化的作者。使用中遇到问题或有新想法，欢迎通过微信联系。")
                     .font(.system(size: 15))
                     .fixedSize(horizontal: false, vertical: true)
-                Caption("版本 \(buildLabel)")
             }
 
             Card {

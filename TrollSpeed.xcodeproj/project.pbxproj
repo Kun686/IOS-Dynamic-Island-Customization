@@ -51,6 +51,8 @@
 		CC654E3E2DABD9C200D54F83 /* InfoPlist.strings in Resources */ = {isa = PBXBuildFile; fileRef = CC711D8E2B5BFD50007235A6 /* InfoPlist.strings */; };
 		CC654E3F2DABD9C200D54F83 /* Settings.bundle in Resources */ = {isa = PBXBuildFile; fileRef = CC2A772F2B6AADB400796650 /* Settings.bundle */; };
 		CC654E402DABD9C200D54F83 /* Localizable.strings in Resources */ = {isa = PBXBuildFile; fileRef = CC711D872B5BFCC4007235A6 /* Localizable.strings */; };
+		CC654E412DABD9C200D54F83 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = CC711D102B5BF551007235A6 /* Assets.xcassets */; };
+		CC711D112B5BF551007235A6 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = CC711D102B5BF551007235A6 /* Assets.xcassets */; };
 		CC711D4A2B5BF5C6007235A6 /* HUDHelper.mm in Sources */ = {isa = PBXBuildFile; fileRef = CC711D1E2B5BF5C6007235A6 /* HUDHelper.mm */; };
 		CC711D4B2B5BF5C6007235A6 /* RootViewController.mm in Sources */ = {isa = PBXBuildFile; fileRef = CC711D1F2B5BF5C6007235A6 /* RootViewController.mm */; };
 		CC711D4C2B5BF5C6007235A6 /* HUDMainWindow.mm in Sources */ = {isa = PBXBuildFile; fileRef = CC711D202B5BF5C6007235A6 /* HUDMainWindow.mm */; };
@@ -533,6 +535,7 @@
 				CC654E3E2DABD9C200D54F83 /* InfoPlist.strings in Resources */,
 				CC654E3F2DABD9C200D54F83 /* Settings.bundle in Resources */,
 				CC654E402DABD9C200D54F83 /* Localizable.strings in Resources */,
+				CC654E412DABD9C200D54F83 /* Assets.xcassets in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -544,6 +547,7 @@
 				CC711D8C2B5BFD50007235A6 /* InfoPlist.strings in Resources */,
 				CC2A77302B6AADB400796650 /* Settings.bundle in Resources */,
 				CC711D852B5BFCC4007235A6 /* Localizable.strings in Resources */,
+				CC711D112B5BF551007235A6 /* Assets.xcassets in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -675,6 +679,8 @@
 		CC654E432DABD9C200D54F83 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = supports/entitlements.plist;
 				CODE_SIGN_IDENTITY = "-";
 				CODE_SIGN_STYLE = Manual;
@@ -718,6 +724,8 @@
 		CC654E442DABD9C200D54F83 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = supports/entitlements.plist;
 				CODE_SIGN_IDENTITY = "-";
 				CODE_SIGN_STYLE = Manual;
@@ -762,6 +770,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
 				CLANG_ANALYZER_LOCALIZABILITY_NONLOCALIZED = YES;
 				CLANG_ANALYZER_NONNULL = YES;
 				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
@@ -829,6 +838,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
 				CLANG_ANALYZER_LOCALIZABILITY_NONLOCALIZED = YES;
 				CLANG_ANALYZER_NONNULL = YES;
 				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
@@ -890,6 +900,8 @@
 		CC711D1B2B5BF551007235A6 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGNING_ALLOWED = NO;
 				CODE_SIGN_ENTITLEMENTS = supports/entitlements.plist;
 				CODE_SIGN_IDENTITY = "-";
@@ -937,6 +949,8 @@
 		CC711D1C2B5BF551007235A6 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGNING_ALLOWED = NO;
 				CODE_SIGN_ENTITLEMENTS = supports/entitlements.plist;
 				CODE_SIGN_IDENTITY = "-";

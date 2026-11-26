@@ -1,5 +1,18 @@
 #import <UIKit/UIKit.h>
 
+extern NSString *const IKSystemIslandDidChangeNotification;
+
+// 系统岛此刻的实际位置，来自 SpringBoard 的 SBSSystemApertureLayoutMonitor。
+// 覆盖模式用它决定胶囊至少要多宽；系统岛展开（长按、来电等）时胶囊让开。
+// 系统里没有这个类，或者连接被拒绝时，frames 一直是 nil，控制器改按最宽的情况留宽度
+@interface IKSystemIslandMonitor : NSObject
++ (instancetype)shared;
+- (void)start;
+@property (nonatomic, copy, readonly) NSArray<NSValue *> *frames;
+// SpringBoard 的回调入口（在它自己的队列上）；模拟器里的验证 App 也用它来模拟系统岛的变化
+- (void)systemApertureLayoutDidChange:(NSArray *)frames;
+@end
+
 // 状态机：决定岛现在显示什么。优先级：通知 > 音乐 > 隐藏
 @interface IKController : NSObject
 + (instancetype)shared;
@@ -10,16 +23,30 @@
 @property (nonatomic) BOOL suspended;
 - (void)refresh;
 
-// 只有自定义胶囊可见时才接管对应触摸点。
-// 其他区域交还给系统灵动岛或下层窗口处理。
+// 只有自定义胶囊范围内的触摸交给悬浮进程，其余区域继续走系统事件路径。
 - (BOOL)shouldHandleTouchAtPoint:(CGPoint)point;
 
 // 该应用的通知是否由岛接管
 - (BOOL)shouldTakeBundle:(NSString *)bundleID;
 // avatar：发送者头像，没有就传 nil，会改用应用图标
-- (void)showNotificationWithBundle:(NSString *)bundleID
+- (NSUInteger)showNotificationWithBundle:(NSString *)bundleID
                            appName:(NSString *)appName
                              title:(NSString *)title
                            message:(NSString *)message
                             avatar:(UIImage *)avatar;
+- (NSUInteger)showNotificationWithBundle:(NSString *)bundleID
+                           appName:(NSString *)appName
+                             title:(NSString *)title
+                           message:(NSString *)message
+                            avatar:(UIImage *)avatar
+                    avatarIsSender:(BOOL)avatarIsSender;
+- (void)updateNotificationAvatar:(UIImage *)avatar
+                        forBundle:(NSString *)bundleID
+                            title:(NSString *)title
+                          message:(NSString *)message
+                            token:(NSUInteger)token;
+- (void)updateNotificationAvatar:(UIImage *)avatar
+                        forBundle:(NSString *)bundleID
+                            title:(NSString *)title
+                          message:(NSString *)message;
 @end

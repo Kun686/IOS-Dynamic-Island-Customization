@@ -4,8 +4,9 @@ set -eu
 
 # This script is used to build the TrollSpeed app and create a tipa file with Xcode.
 
-# Read the version from the existing control file
-VERSION=$(./get-version.sh) || exit 1
+# Read the version from the existing control file. Use sh so a fresh checkout
+# still works when the executable bit was not preserved.
+VERSION=$(sh ./get-version.sh) || exit 1
 
 echo "Using version: $VERSION"
 
@@ -25,6 +26,8 @@ fi
 BUILD_DIR=".build"
 BUILD_LOG="$BUILD_DIR/xcodebuild.log"
 mkdir -p "$BUILD_DIR"
+
+rm -rf TrollSpeed.xcarchive
 
 BUILD_STATUS=0
 if xcodebuild clean build archive \
@@ -50,13 +53,16 @@ fi
 
 chmod 0644 Resources/Info.plist
 cp supports/entitlements.plist TrollSpeed.xcarchive/Products
-cd TrollSpeed.xcarchive/Products/Applications || exit
-codesign --remove-signature TrollSpeed.app
-cd - || exit
-cd TrollSpeed.xcarchive/Products || exit
+cd TrollSpeed.xcarchive/Products
+codesign --remove-signature Applications/TrollSpeed.app 2>/dev/null || true
 mv Applications Payload
 ldid -Sentitlements.plist Payload/TrollSpeed.app
+if ! ldid -e Payload/TrollSpeed.app/TrollSpeed | grep -q "com.apple.springboard.accessibility-window-hosting"; then
+    echo "Error: entitlements are missing from the signed binary" >&2
+    exit 1
+fi
 chmod 0644 Payload/TrollSpeed.app/Info.plist
+rm -f TrollSpeed.tipa
 zip -qr TrollSpeed.tipa Payload
 cd - || exit
 mkdir -p packages
@@ -67,4 +73,6 @@ if [ -n "${IK_SUFFIX:-}" ]; then
     esac
     PACKAGE_NAME="$PACKAGE_NAME-$IK_SUFFIX"
 fi
-mv TrollSpeed.xcarchive/Products/TrollSpeed.tipa "packages/$PACKAGE_NAME.tipa"
+OUTPUT="packages/$PACKAGE_NAME.tipa"
+mv TrollSpeed.xcarchive/Products/TrollSpeed.tipa "$OUTPUT"
+echo "Packaged: $OUTPUT"

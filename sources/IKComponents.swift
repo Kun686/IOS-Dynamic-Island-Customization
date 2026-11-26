@@ -86,70 +86,6 @@ struct Caption: View {
 enum PreviewMode: Hashable { case idle, music, notif }
 
 @available(iOS 16.0, *)
-struct TransitionDemo: View {
-    var style: Int
-    var settings: Settings
-    var run: Int
-    @State private var visible = false
-    @State private var offset: CGFloat = -28
-    @State private var scale: CGFloat = 1
-
-    private func entrance(for style: Int) -> Animation {
-        switch style {
-        case 1: return .spring(response: 0.42, dampingFraction: 1.0)
-        case 2: return .easeInOut(duration: 0.3)
-        case 3: return .spring(response: 0.5, dampingFraction: 0.58)
-        case 4: return .spring(response: 0.85, dampingFraction: 0.4)
-        default: return .spring(response: 0.62, dampingFraction: 0.62)
-        }
-    }
-
-    @MainActor
-    private func reset(for style: Int) {
-        var transaction = Transaction()
-        transaction.animation = nil
-        withTransaction(transaction) {
-            visible = false
-            offset = style == 2 ? 0 : -28
-            scale = style == 3 ? 0.6 : 1
-        }
-    }
-
-    @MainActor
-    private func play(style: Int) async {
-        reset(for: style)
-        do {
-            try await Task.sleep(nanoseconds: 50_000_000)
-            guard !Task.isCancelled else { return }
-            withAnimation(entrance(for: style)) {
-                visible = true
-                offset = 0
-                scale = 1
-            }
-
-            try await Task.sleep(nanoseconds: 1_650_000_000)
-            guard !Task.isCancelled else { return }
-            withAnimation(.easeIn(duration: 0.28)) {
-                visible = false
-                offset = style == 2 ? 0 : -24
-                scale = style == 3 ? 0.7 : 1
-            }
-        } catch {
-            // 新的演示触发时，SwiftUI 会取消旧任务，保持当前帧等待新任务接管。
-        }
-    }
-
-    var body: some View {
-        IslandPreview(mode: .music, s: settings)
-            .opacity(visible ? 1 : 0)
-            .offset(y: offset)
-            .scaleEffect(scale)
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .task(id: run) { await play(style: style) }
-    }
-}
-
-@available(iOS 16.0, *)
 struct IslandPreview: View {
     var mode: PreviewMode
     var s: Settings
@@ -161,21 +97,20 @@ struct IslandPreview: View {
             case .idle:
                 Capsule().fill(Color.black).frame(width: 126, height: 37)
             case .music:
+                let size = CGFloat(s.lyricFontSize)
+                let titleColor = s.previewColor(mode: s.titleColorMode, custom: s.titleColor)
+                let lyricColor = s.previewColor(mode: s.lyricColorMode, custom: s.lyricColor)
                 HStack(spacing: 12) {
                     Disc(size: 52, spinning: s.spin, seconds: s.spinSeconds, accent: accent)
                     VStack(alignment: .leading, spacing: 2) {
-                        if s.lyric {
-                            if s.lyricLines >= 2 {
-                                Text("歌曲名").font(.system(size: 16, weight: .bold))
-                                    .foregroundColor(Color(hex: s.songTitleColor))
-                                Text("当前歌词行").font(.system(size: 13))
-                                    .foregroundColor(accent)
-                            } else {
-                                Text("当前歌词行").font(.system(size: 16, weight: .bold))
-                                    .foregroundColor(accent)
-                            }
+                        if s.lyric && s.lyricLines >= 2 {
+                            Text("歌名 - 歌手").font(.system(size: size, weight: .bold)).foregroundColor(titleColor)
+                                .lineLimit(1)
+                            LyricSample(color: lyricColor, font: .system(size: max(11, size - 3)), filled: s.lyricEffect == 1)
+                        } else if s.lyric {
+                            LyricSample(color: lyricColor, font: .system(size: size, weight: .bold), filled: s.lyricEffect == 1)
                         } else {
-                            Text("歌曲名").font(.system(size: 15, weight: .medium)).foregroundColor(Color(hex: s.songTitleColor))
+                            Text("歌曲名").font(.system(size: 15, weight: .medium)).foregroundColor(.ikText)
                         }
                     }
                     Spacer(minLength: 0)
@@ -210,18 +145,45 @@ struct IslandPreview: View {
     }
 }
 
-// 颜色来源：强调色 / 跟随封面 / 自定义（自定义时出现取色器）
+// 一句示例歌词。填色动效时前半句是歌词颜色、后半句是没唱到的底色
+@available(iOS 16.0, *)
+struct LyricSample: View {
+    var color: Color
+    var font: Font
+    var filled: Bool
+
+    var body: some View {
+        let text = Text("正在唱的这一句歌词").font(font).lineLimit(1)
+        if filled {
+            text.foregroundColor(Color.white.opacity(0.5))
+                .overlay(alignment: .leading) {
+                    GeometryReader { geo in
+                        text.foregroundColor(color)
+                            .fixedSize()
+                            .frame(width: geo.size.width * 0.55, alignment: .leading)
+                            .clipped()
+                    }
+                }
+        } else {
+            text.foregroundColor(color)
+        }
+    }
+}
+
+// 颜色来源：强调色 / 跟随封面 / 自定义（自定义时出现取色器）。allowsDefault 时多一个“默认”（白色）
 @available(iOS 16.0, *)
 struct ColorModeRow: View {
     var title: String
     @Binding var mode: Int
     @Binding var hex: String
     var accent: Color
+    var allowsDefault = false
 
     var body: some View {
+        let base: [(Int, String)] = [(0, "强调色"), (1, "跟随封面"), (2, "自定义")]
         VStack(alignment: .leading, spacing: 8) {
             Caption(title)
-            Segmented(value: $mode, options: [(0, "强调色"), (1, "跟随封面"), (2, "自定义")], accent: accent)
+            Segmented(value: $mode, options: allowsDefault ? [(3, "默认")] + base : base, accent: accent)
             if mode == 2 {
                 ColorPicker("选择颜色", selection: Binding(
                     get: { Color(hex: hex) },
@@ -230,5 +192,104 @@ struct ColorModeRow: View {
                     .frame(minHeight: 44)
             }
         }
+    }
+}
+
+// 带标题和当前数值的滑块
+@available(iOS 16.0, *)
+struct SliderRow: View {
+    var title: String
+    @Binding var value: Double
+    var range: ClosedRange<Double>
+    var step: Double
+    var format = "%.0f"
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Caption(title)
+                Spacer()
+                Text(String(format: format, value)).font(.system(size: 13)).monospacedDigit()
+            }
+            Slider(value: $value, in: range, step: step) { Text(title) }
+                .frame(minHeight: 44)
+        }
+    }
+}
+
+// 过渡动画的演示：一个模拟的系统岛，下面的胶囊按所选风格出现、停留、收起、再出现。
+// trigger 每变一次就从头播一遍
+@available(iOS 16.0, *)
+struct TransitionStage: View {
+    var style: Int
+    var trigger: Int
+    var accent: Color
+
+    @State private var shown = true
+    @State private var run = 0
+
+    private var appear: Animation {
+        switch style {
+        case 1: return .spring(response: 0.42, dampingFraction: 1.0)
+        case 2: return .easeInOut(duration: 0.3)
+        case 3: return .spring(response: 0.45, dampingFraction: 0.58)
+        case 4: return .spring(response: 0.6, dampingFraction: 0.4)
+        default: return .spring(response: 0.5, dampingFraction: 0.62)
+        }
+    }
+
+    // 淡入和缩放是原地出现，其余是从岛里长出来
+    private var inPlace: Bool { style == 2 || style == 3 }
+
+    private func play() {
+        run += 1
+        let current = run
+        var snap = Transaction()
+        snap.disablesAnimations = true
+        withTransaction(snap) { shown = false }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+            guard current == run else { return }
+            withAnimation(appear) { shown = true }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.9) {
+            guard current == run else { return }
+            withAnimation(.easeIn(duration: 0.3)) { shown = false }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+            guard current == run else { return }
+            withAnimation(appear) { shown = true }
+        }
+    }
+
+    var body: some View {
+        let tucked = !shown && !inPlace
+        ZStack(alignment: .top) {
+            HStack(spacing: 10) {
+                Circle().fill(Color(hex: "3A3A44")).frame(width: 34, height: 34)
+                VStack(alignment: .leading, spacing: 3) {
+                    Capsule().fill(Color.white.opacity(0.85)).frame(width: 92, height: 8)
+                    Capsule().fill(accent).frame(width: 136, height: 7)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 10)
+            .opacity(tucked ? 0 : 1)
+            .frame(width: tucked ? 112 : 248, height: tucked ? 26 : 54)
+            .background(Color.black)
+            .clipShape(Capsule())
+            .scaleEffect(!shown && style == 3 ? 0.6 : 1)
+            .opacity(!shown && inPlace ? 0 : 1)
+            .offset(y: tucked ? 5 : 48)
+
+            // 模拟的系统岛，盖在上面
+            Capsule().fill(Color.black).frame(width: 126, height: 37)
+        }
+        .frame(maxWidth: .infinity)
+        .frame(height: 112, alignment: .top)
+        .padding(.top, 10)
+        .background(Color.ikStage)
+        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .onChange(of: trigger) { _ in play() }
+        .accessibilityHidden(true)
     }
 }

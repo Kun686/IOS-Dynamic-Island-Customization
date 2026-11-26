@@ -7,6 +7,7 @@
 @property (nonatomic, strong) UIView *hole;
 @property (nonatomic) BOOL spinning;
 @property (nonatomic) double period;
+@property (nonatomic) CGFloat restAngle;   // 停转时停在的角度，再转时从这里接着转
 @end
 
 @implementation IKCoverView
@@ -56,37 +57,40 @@
 }
 
 - (void)setSpinning:(BOOL)spinning period:(double)seconds {
-    BOOL changed = self.spinning != spinning || fabs(seconds - self.period) > 0.01;
+    BOOL periodChanged = fabs(seconds - self.period) > 0.01;
     self.spinning = spinning;
-    self.period = MAX(0.1, seconds);
-    if (changed) [self applySpin];
+    self.period = seconds;
+    if (periodChanged) [self freeze]; // 换了转速：从当前角度重新起转
+    [self applySpin];
 }
 
-- (CGFloat)currentRotation {
+// 停转：把当前转到的角度写进图层，再拿掉旋转动画。
+// 不能用 layer.speed = 0 来暂停：图层被暂停后，UIKit 动画块里给它加的布局动画永远走不完，
+// 那个动画块的完成回调也就永远不会来（之前“暂停后收起的胶囊一直留在屏幕上”就是这个原因）
+- (void)freeze {
     CALayer *layer = self.disc.layer;
-    CALayer *presentation = layer.presentationLayer;
-    CATransform3D transform = presentation ? presentation.transform : layer.transform;
-    return atan2(transform.m12, transform.m11);
+    if (![layer animationForKey:@"ik.spin"]) return;
+    CALayer *shown = layer.presentationLayer ?: layer;
+    CGFloat angle = [[shown valueForKeyPath:@"transform.rotation.z"] doubleValue];
+    [layer removeAnimationForKey:@"ik.spin"];
+    self.restAngle = angle;
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    [layer setValue:@(angle) forKeyPath:@"transform.rotation.z"];
+    [CATransaction commit];
 }
 
 - (void)applySpin {
     CALayer *layer = self.disc.layer;
-    CGFloat rotation = [self currentRotation];
-    [layer removeAnimationForKey:@"ik.spin"];
-    layer.speed = 1;
-    layer.timeOffset = 0;
-    layer.beginTime = 0;
-    layer.transform = CATransform3DMakeRotation(rotation, 0, 0, 1);
-
-    if (self.spinning && self.window) {
-        CABasicAnimation *animation = [CABasicAnimation animationWithKeyPath:@"transform.rotation.z"];
-        animation.fromValue = @(rotation);
-        animation.toValue = @(rotation + M_PI * 2);
-        animation.duration = self.period;
-        animation.repeatCount = HUGE_VALF;
-        animation.removedOnCompletion = NO;
-        [layer addAnimation:animation forKey:@"ik.spin"];
-    }
+    if (!self.spinning) { [self freeze]; return; }
+    if ([layer animationForKey:@"ik.spin"] || !self.window) return;
+    CABasicAnimation *a = [CABasicAnimation animationWithKeyPath:@"transform.rotation.z"];
+    a.fromValue = @(self.restAngle);
+    a.toValue = @(self.restAngle + M_PI * 2);
+    a.duration = self.period;
+    a.repeatCount = HUGE_VALF;
+    a.removedOnCompletion = NO;
+    [layer addAnimation:a forKey:@"ik.spin"];
 }
 
 @end
@@ -158,35 +162,315 @@
 
 @end
 
+#pragma mark - 一行文字
+
+typedef NS_ENUM(NSInteger, IKLineChange) {
+    IKLineChangeNone = 0,
+    IKLineChangeFade,
+    IKLineChangePush,   // 旧的一行向上滑出，新的一行从下面滑入
+};
+
+// 一行文字。可以带一层从左到右铺开的高亮；文字比视图宽时不截断，而是跟着进度向左滚动
+@interface IKLineView : UIView
+@property (nonatomic, strong) UIFont *font;
+@property (nonatomic, strong) UIColor *textColor;
+@property (nonatomic, strong) UIColor *highlightColor;   // nil：这一行没有高亮层
+@property (nonatomic) BOOL truncates;                    // YES：过长时截断并加省略号，不滚动
+@property (nonatomic, copy, readonly) NSString *text;
+- (void)setText:(NSString *)text change:(IKLineChange)change;
+// duration > 0：这一行在 duration 秒内唱完。fill 为 YES 时高亮从左到右铺开，过长的文字跟着进度向左滚动。
+// duration <= 0：没有时间信息，整行直接高亮；过长时来回缓慢滚动。
+// playing 为 NO 时停在当前位置
+- (void)setDuration:(double)duration elapsed:(double)elapsed playing:(BOOL)playing fill:(BOOL)fill;
+@end
+
+@interface IKLineView ()
+@property (nonatomic, copy) NSString *text;
+@property (nonatomic, strong) UIView *track;        // 承载两层文字，滚动时整体平移
+@property (nonatomic, strong) UILabel *baseLabel;
+@property (nonatomic, strong) UILabel *topLabel;    // 高亮层，叠在 baseLabel 上
+@property (nonatomic, strong) CALayer *fillMask;
+@property (nonatomic) CGFloat textWidth;
+@property (nonatomic) double duration;
+@property (nonatomic) double startTime;             // 这一行开始的时刻（CACurrentMediaTime 基准）
+@property (nonatomic) double pausedFraction;
+@property (nonatomic) BOOL playing;
+@property (nonatomic) BOOL fill;
+@property (nonatomic) BOOL applied;                 // 当前参数已经变成动画了
+@property (nonatomic) CGFloat appliedWidth;
+@property (nonatomic) BOOL marqueeRunning;          // 正在跑“没有时间信息”的来回滚动
+@property (nonatomic) CGFloat restOffset;           // 来回滚动被打断时已经滚过去的量，之后从这里接着滚
+@end
+
+@implementation IKLineView
+
+- (instancetype)initWithFrame:(CGRect)frame {
+    if ((self = [super initWithFrame:frame])) {
+        self.clipsToBounds = YES;
+        self.userInteractionEnabled = NO;
+        _text = @"";
+        _font = [UIFont systemFontOfSize:16 weight:UIFontWeightBold];
+        _textColor = [UIColor whiteColor];
+        _track = [UIView new];
+        _baseLabel = [UILabel new];
+        _topLabel = [UILabel new];
+        for (UILabel *l in @[_baseLabel, _topLabel]) {
+            l.font = _font;
+            l.lineBreakMode = NSLineBreakByClipping;
+            [_track addSubview:l];
+        }
+        _baseLabel.textColor = _textColor;
+        _topLabel.hidden = YES;
+        [self addSubview:_track];
+    }
+    return self;
+}
+
+- (void)setFont:(UIFont *)font {
+    if ([_font isEqual:font]) return;
+    _font = font;
+    self.baseLabel.font = font;
+    self.topLabel.font = font;
+    [self measure];
+}
+
+- (void)setTextColor:(UIColor *)textColor {
+    _textColor = textColor;
+    self.baseLabel.textColor = textColor;
+}
+
+- (void)setHighlightColor:(UIColor *)highlightColor {
+    BOOL had = (_highlightColor != nil);
+    _highlightColor = highlightColor;
+    self.topLabel.textColor = highlightColor;
+    if (had != (highlightColor != nil)) [self invalidate];
+}
+
+- (void)setTruncates:(BOOL)truncates {
+    if (_truncates == truncates) return;
+    _truncates = truncates;
+    NSLineBreakMode mode = truncates ? NSLineBreakByTruncatingTail : NSLineBreakByClipping;
+    self.baseLabel.lineBreakMode = mode;
+    self.topLabel.lineBreakMode = mode;
+    [self invalidate];
+}
+
+- (void)invalidate {
+    self.applied = NO;
+    [self setNeedsLayout];
+}
+
+- (void)measure {
+    self.textWidth = self.text.length
+        ? ceil([self.text sizeWithAttributes:@{NSFontAttributeName: self.font}].width) + 1 : 0;
+    // 文字或字体变了：之前滚到哪里已经没有意义，从头开始
+    [self.track.layer removeAnimationForKey:@"ik.scroll"];
+    self.marqueeRunning = NO;
+    self.restOffset = 0;
+    [self invalidate];
+}
+
+- (void)setText:(NSString *)text change:(IKLineChange)change {
+    NSString *t = text ?: @"";
+    if ([t isEqualToString:self.text]) return;
+    if (change != IKLineChangeNone && self.window && !self.hidden) {
+        CATransition *tr = [CATransition animation];
+        if (change == IKLineChangePush) {
+            tr.type = kCATransitionPush;
+            tr.subtype = kCATransitionFromTop;
+            tr.duration = 0.32;
+        } else {
+            tr.type = kCATransitionFade;
+            tr.duration = 0.2;
+        }
+        tr.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+        [self.layer addAnimation:tr forKey:@"ik.line"];
+    }
+    self.text = t;
+    self.baseLabel.text = t;
+    self.topLabel.text = t;
+    [self measure];
+}
+
+- (void)setDuration:(double)duration elapsed:(double)elapsed playing:(BOOL)playing fill:(BOOL)fill {
+    elapsed = MAX(0, elapsed);
+    double start = CACurrentMediaTime() - elapsed;
+    double frac = duration > 0 ? MIN(1, elapsed / duration) : 1;
+    if (self.applied && fabs(duration - self.duration) < 0.01 && playing == self.playing && fill == self.fill) {
+        // 控制器每 0.25 秒会重新送一次参数，没有实质变化就不要打断正在跑的动画
+        if (duration <= 0) return;
+        if (playing ? fabs(start - self.startTime) < 0.3 : fabs(frac - self.pausedFraction) < 0.02) return;
+    }
+    self.duration = duration;
+    self.startTime = start;
+    self.pausedFraction = frac;
+    self.playing = playing;
+    self.fill = fill;
+    [self applyProgress];
+}
+
+- (void)didMoveToWindow {
+    [super didMoveToWindow];
+    if (self.window) [self invalidate];
+}
+
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    CGFloat W = self.bounds.size.width, H = self.bounds.size.height;
+    CGFloat lw = self.truncates ? W : self.textWidth;
+    // track 左对齐在本行的 x = 0：宽 lw、中心在 lw / 2，等价于 frame = (0, 0, lw, H)，
+    // 所以平移 0 时看到的是文字开头，平移 -(lw - W) 时文字末尾正好贴着本行右边。
+    // 不直接设 frame，是因为 track 上带着滚动用的平移变换
+    void (^place)(void) = ^{
+        self.track.bounds = CGRectMake(0, 0, lw, H);
+        self.track.center = CGPointMake(lw / 2, H / 2);
+        self.baseLabel.frame = self.track.bounds;
+        self.topLabel.frame = self.track.bounds;
+    };
+    // 截断的行宽度跟着胶囊走，可以随胶囊的形变一起动画；
+    // 不截断的行宽度只取决于文字，换句时直接到位，不要被外层的弹簧动画带着伸缩
+    if (self.truncates) place();
+    else [UIView performWithoutAnimation:place];
+    if (!self.applied || fabs(self.appliedWidth - W) > 0.5) [self applyProgress];
+}
+
+// 按当前的进度参数摆好高亮遮罩和滚动位置；正在播放时再加上走到这一行结束的动画
+- (void)applyProgress {
+    CGFloat W = self.bounds.size.width, H = self.bounds.size.height;
+    CALayer *trackLayer = self.track.layer;
+    if (self.marqueeRunning) {
+        // 来回滚动要被打断了（暂停、宽度变化）：记下此刻滚到的位置
+        CALayer *shown = trackLayer.presentationLayer;
+        if (shown) self.restOffset = -[[shown valueForKeyPath:@"transform.translation.x"] doubleValue];
+        self.marqueeRunning = NO;
+    }
+    [trackLayer removeAnimationForKey:@"ik.scroll"];
+    [self.fillMask removeAnimationForKey:@"ik.fill"];
+
+    BOOL highlight = (self.highlightColor != nil);
+    self.topLabel.hidden = !highlight;
+    if (W <= 0 || H <= 0) { self.applied = NO; return; }
+    self.applied = YES;
+    self.appliedWidth = W;
+
+    CGFloat tw = self.textWidth;
+    CGFloat overflow = self.truncates ? 0 : MAX(0, tw - W);
+    BOOL scrolls = overflow > 0.5;
+    BOOL timed = self.duration > 0;
+    BOOL filling = highlight && self.fill && timed && tw > 0;
+    double frac = 1;
+    if (timed) {
+        frac = self.playing ? (CACurrentMediaTime() - self.startTime) / self.duration : self.pausedFraction;
+        frac = MAX(0, MIN(1, frac));
+    }
+
+    // 滚动量是进度的分段线性函数。填色时让填色的前沿停在可见宽度的 55% 处，
+    // 所以开头和结尾不动、中间跟着填色走；不填色时用中间 70% 的时间匀速滚完
+    double f1 = filling ? (W * 0.55) / tw : 0.15;
+    double f2 = filling ? (W * 0.55 + overflow) / tw : 0.85;
+    CGFloat (^offsetAt)(double) = ^CGFloat(double f) {
+        if (!scrolls || f2 <= f1) return 0;
+        return overflow * MAX(0, MIN(1, (f - f1) / (f2 - f1)));
+    };
+
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    if (filling) {
+        if (!self.fillMask) {
+            self.fillMask = [CALayer layer];
+            self.fillMask.backgroundColor = [UIColor blackColor].CGColor;
+            self.fillMask.anchorPoint = CGPointZero;
+        }
+        CALayer *m = self.fillMask;
+        m.position = CGPointZero;
+        m.bounds = CGRectMake(0, 0, tw, H);
+        m.transform = CATransform3DMakeScale(MAX(frac, 0.0001), 1, 1);
+        self.topLabel.layer.mask = m;
+    } else {
+        self.topLabel.layer.mask = nil;
+    }
+    // 没有时间信息的一行停在上次滚到的位置（暂停时不跳回开头）
+    CGFloat rest = (!timed && scrolls) ? MAX(0, MIN(self.restOffset, overflow)) : 0;
+    if (timed || !scrolls) self.restOffset = 0;
+    trackLayer.transform = CATransform3DMakeTranslation(timed ? -offsetAt(frac) : -rest, 0, 0);
+    [CATransaction commit];
+
+    if (!self.playing) return;
+
+    if (!timed) {
+        if (!scrolls) return;
+        // 没有时间信息（歌名等）：停一下，匀速滚到头，停一下，再滚回来。
+        // 之前滚到一半被打断的话，用 timeOffset 把动画的起点挪到那个位置，接着往前滚
+        double hold = 1.6, travel = MAX(1.5, overflow / 28.0), total = hold * 2 + travel;
+        CAKeyframeAnimation *s = [CAKeyframeAnimation animationWithKeyPath:@"transform.translation.x"];
+        s.values = @[@0, @0, @(-overflow), @(-overflow)];
+        s.keyTimes = @[@0, @(hold / total), @((hold + travel) / total), @1];
+        s.duration = total;
+        if (rest > 0.5) s.timeOffset = hold + travel * (rest / overflow);
+        s.autoreverses = YES;
+        s.repeatCount = HUGE_VALF;
+        s.removedOnCompletion = NO;
+        [trackLayer addAnimation:s forKey:@"ik.scroll"];
+        self.marqueeRunning = YES;
+        return;
+    }
+
+    if (frac >= 1) return;
+    double remaining = self.duration * (1 - frac);
+    if (filling) {
+        CABasicAnimation *a = [CABasicAnimation animationWithKeyPath:@"transform.scale.x"];
+        a.fromValue = @(MAX(frac, 0.0001));
+        a.toValue = @1.0;
+        a.duration = remaining;
+        a.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionLinear];
+        a.fillMode = kCAFillModeForwards;
+        a.removedOnCompletion = NO;
+        [self.fillMask addAnimation:a forKey:@"ik.fill"];
+    }
+    if (scrolls) {
+        NSMutableArray<NSNumber *> *values = [NSMutableArray array], *times = [NSMutableArray array];
+        double last = -1;
+        for (NSNumber *n in @[@(frac), @(f1), @(f2), @1.0]) {
+            double f = n.doubleValue;
+            if (f < frac || f > 1 || f - last < 1e-6) continue;
+            last = f;
+            [values addObject:@(-offsetAt(f))];
+            [times addObject:@((f - frac) / (1 - frac))];
+        }
+        if (values.count < 2) return;
+        CAKeyframeAnimation *s = [CAKeyframeAnimation animationWithKeyPath:@"transform.translation.x"];
+        s.values = values;
+        s.keyTimes = times;
+        s.duration = remaining;
+        s.calculationMode = kCAAnimationLinear;
+        s.fillMode = kCAFillModeForwards;
+        s.removedOnCompletion = NO;
+        [trackLayer addAnimation:s forKey:@"ik.scroll"];
+    }
+}
+
+@end
+
 #pragma mark - 岛
 
+typedef NS_ENUM(NSInteger, IKTextKind) {
+    IKTextKindPlain = 0,   // 歌名 + 歌手
+    IKTextKindLyric,       // 歌词（双行时上面是歌名）
+    IKTextKindNotif,       // 通知标题 + 正文
+};
+
 @interface IKIslandView ()
+@property (nonatomic, strong) UIView *content;       // 除黑色底以外的所有内容，可以单独淡出
 @property (nonatomic, strong) IKCoverView *cover;
 @property (nonatomic, strong) IKBarsView *barsView;
 @property (nonatomic, strong) UIImageView *iconView;
 @property (nonatomic, strong) UILabel *appLabel;
-@property (nonatomic, strong) UILabel *label1;
-@property (nonatomic, strong) UILabel *label2;
-@property (nonatomic, strong) UIView *label1Viewport;
-@property (nonatomic, strong) UIView *label2Viewport;
+@property (nonatomic, strong) IKLineView *row1;
+@property (nonatomic, strong) IKLineView *row2;
 @property (nonatomic) BOOL iconRound;
-@property (nonatomic, strong) UILabel *label1H;      // 当前行的高亮层，叠在 label1 上
-@property (nonatomic, strong) UILabel *label2H;      // 双行模式下当前歌词的高亮层
-@property (nonatomic, strong) CALayer *sweepMask;
-@property (nonatomic) double sweepStart;             // 这一行开始的时刻（CACurrentMediaTime 基准）
-@property (nonatomic) double sweepDuration;
-@property (nonatomic) double sweepPausedFraction;
-@property (nonatomic) BOOL sweepPlaying;
-@property (nonatomic) CGFloat label1Offset;
-@property (nonatomic) CGFloat label2Offset;
-@property (nonatomic) CGFloat label1TextWidth;
-@property (nonatomic) CGFloat label2TextWidth;
-@property (nonatomic) BOOL sweepConfigured;
-@property (nonatomic) double configuredSweepStart;
-@property (nonatomic) BOOL configuredSweepPlaying;
+@property (nonatomic) IKTextKind textKind;
 @property (nonatomic, strong) CAShapeLayer *ringTrack;
 @property (nonatomic, strong) CAShapeLayer *ring;
-- (void)removeLyricScrollAnimationsForViews:(NSArray<UIView *> *)views;
 @end
 
 @implementation IKIslandView
@@ -198,6 +482,15 @@
         self.layer.cornerCurve = kCACornerCurveContinuous;
         _lyricLines = 2;
         _cutoutWidth = 126;
+        _cutoutBand = 37;
+        _lyricEffect = 1;
+        _lyricFontSize = 16;
+        _contentAlpha = 1;
+
+        _content = [[UIView alloc] initWithFrame:self.bounds];
+        _content.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        _content.userInteractionEnabled = NO;
+        [self addSubview:_content];
 
         _cover = [IKCoverView new];
         _barsView = [IKBarsView new];
@@ -212,35 +505,10 @@
         _appLabel.textColor = [UIColor colorWithWhite:0.66 alpha:1];
         _appLabel.textAlignment = NSTextAlignmentRight;
 
-        _label1 = [UILabel new];
-        _label1.font = [UIFont systemFontOfSize:16 weight:UIFontWeightBold];
-        _label1.lineBreakMode = NSLineBreakByClipping;
-
-        _label2 = [UILabel new];
-        _label2.font = [UIFont systemFontOfSize:13 weight:UIFontWeightRegular];
-        _label2.textColor = [UIColor colorWithWhite:0.66 alpha:1];
-        _label2.lineBreakMode = NSLineBreakByClipping;
-
-        _label1Viewport = [UIView new];
-        _label1Viewport.clipsToBounds = YES;
-        _label2Viewport = [UIView new];
-        _label2Viewport.clipsToBounds = YES;
-        for (UIView *v in @[_cover, _barsView, _iconView, _appLabel, _label1Viewport, _label2Viewport]) [self addSubview:v];
-
-        _label1H = [UILabel new];
-        _label1H.font = _label1.font;
-        _label1H.lineBreakMode = NSLineBreakByClipping;
-        _label1H.hidden = YES;
-        [_label1Viewport addSubview:_label1];
-        [_label1Viewport addSubview:_label1H];
-        _label2H = [UILabel new];
-        _label2H.font = _label2.font;
-        _label2H.lineBreakMode = NSLineBreakByClipping;
-        _label2H.hidden = YES;
-        [_label2Viewport addSubview:_label2];
-        [_label2Viewport addSubview:_label2H];
-        _lyricEffect = 1;
-        _lyricFontSize = 16;
+        _row1 = [IKLineView new];
+        _row2 = [IKLineView new];
+        for (UIView *v in @[_cover, _barsView, _iconView, _appLabel, _row1, _row2]) [_content addSubview:v];
+        [self applyFonts];
 
         _ringTrack = [CAShapeLayer layer];
         _ringTrack.fillColor = [UIColor clearColor].CGColor;
@@ -253,8 +521,8 @@
         _ring.strokeEnd = 0;
         _ringTrack.hidden = YES;
         _ring.hidden = YES;
-        [self.layer addSublayer:_ringTrack];
-        [self.layer addSublayer:_ring];
+        [_content.layer addSublayer:_ringTrack];
+        [_content.layer addSublayer:_ring];
         self.accent = [UIColor whiteColor];
     }
     return self;
@@ -264,52 +532,60 @@
     _accent = accent;
     self.cover.accent = accent;
     [self.barsView setColor:accent];
-    [self applyColors];
+    [self applyTextStyles];
 }
 
-- (void)applyColors {
-    BOOL notif = (self.state == IKStateNotif);
+// 每一行用什么颜色、要不要高亮层，取决于现在显示的是哪一类文字
+- (void)applyTextStyles {
+    UIColor *dim = [UIColor colorWithWhite:1 alpha:0.5];
+    UIColor *title = self.titleColor ?: [UIColor whiteColor];
     UIColor *lyric = self.lyricColor ?: self.accent;
-    UIColor *songTitle = self.songTitleColor ?: [UIColor colorWithWhite:1 alpha:0.66];
-    UIColor *notifTitle = self.notifTitleColor ?: [UIColor whiteColor];
-    UIColor *notifMessage = self.notifMessageColor ?: [UIColor colorWithWhite:1 alpha:0.66];
-    // 双行时第一行是歌名，第二行是当前歌词。高亮层只覆盖当前歌词。
-    self.label1.textColor = notif ? notifTitle
-                                  : (self.lyricLines >= 2 ? songTitle
-                                                          : [UIColor colorWithWhite:1 alpha:0.5]);
-    self.label2.textColor = notif ? notifMessage
-                                  : [UIColor colorWithWhite:1 alpha:0.5];
-    self.appLabel.textColor = notif ? notifTitle : [UIColor colorWithWhite:0.66 alpha:1];
-    self.label1H.textColor = lyric;
-    self.label2H.textColor = lyric;
+    UIColor *c1 = title, *c2 = dim, *h1 = nil, *h2 = nil;
+    BOOL truncates = NO;
+    switch (self.textKind) {
+        case IKTextKindNotif:
+            c1 = self.notifTitleColor ?: [UIColor whiteColor];
+            c2 = self.notifMessageColor ?: [UIColor colorWithWhite:1 alpha:0.66];
+            truncates = YES;
+            break;
+        case IKTextKindLyric:
+            // 双行：第一行歌名（自己的颜色，不带高亮），第二行歌词。单行：只有歌词
+            if (self.lyricLines >= 2) { h2 = lyric; }
+            else { c1 = dim; h1 = lyric; }
+            break;
+        case IKTextKindPlain:
+            break;
+    }
+    self.row1.textColor = c1;
+    self.row1.highlightColor = h1;
+    self.row1.truncates = truncates;
+    self.row2.textColor = c2;
+    self.row2.highlightColor = h2;
+    self.row2.truncates = truncates;
+    self.appLabel.textColor = self.notifTitleColor ?: [UIColor colorWithWhite:1 alpha:0.66];
     self.ring.strokeColor = (self.ringColor ?: self.accent).CGColor;
 }
 
-- (void)setLyricColor:(UIColor *)lyricColor { _lyricColor = lyricColor; [self applyColors]; }
-- (void)setSongTitleColor:(UIColor *)songTitleColor { _songTitleColor = songTitleColor; [self applyColors]; }
-- (void)setRingColor:(UIColor *)ringColor { _ringColor = ringColor; [self applyColors]; }
-- (void)setNotifTitleColor:(UIColor *)color { _notifTitleColor = color; [self applyColors]; }
-- (void)setNotifMessageColor:(UIColor *)color { _notifMessageColor = color; [self applyColors]; }
-
-- (void)setLyricEffect:(NSInteger)lyricEffect {
-    if (_lyricEffect == lyricEffect) return;
-    _lyricEffect = lyricEffect;
-    [self applySweep];
+- (void)applyFonts {
+    CGFloat size = self.lyricFontSize;
+    self.row1.font = [UIFont systemFontOfSize:size weight:UIFontWeightBold];
+    self.row2.font = [UIFont systemFontOfSize:MAX(11, size - 3) weight:UIFontWeightRegular];
 }
+
+- (void)setLyricColor:(UIColor *)lyricColor { _lyricColor = lyricColor; [self applyTextStyles]; }
+- (void)setTitleColor:(UIColor *)titleColor { _titleColor = titleColor; [self applyTextStyles]; }
+- (void)setRingColor:(UIColor *)ringColor { _ringColor = ringColor; [self applyTextStyles]; }
+- (void)setNotifTitleColor:(UIColor *)color { _notifTitleColor = color; [self applyTextStyles]; }
+- (void)setNotifMessageColor:(UIColor *)color { _notifMessageColor = color; [self applyTextStyles]; }
 
 - (void)setLyricFontSize:(CGFloat)size {
     if (fabs(_lyricFontSize - size) < 0.1) return;
     _lyricFontSize = size;
-    self.label1.font = [UIFont systemFontOfSize:size weight:UIFontWeightBold];
-    self.label1H.font = self.label1.font;
-    self.label2.font = [UIFont systemFontOfSize:MAX(11, size - 3) weight:UIFontWeightRegular];
-    self.label2H.font = self.label2.font;
-    [self applySweep];
+    [self applyFonts];
 }
 
 - (void)setState:(IKState)state {
     _state = state;
-    [self applyColors];
     [self setNeedsLayout];
 }
 
@@ -318,213 +594,87 @@
     [self setNeedsLayout];
 }
 
-- (void)setLyricLines:(NSInteger)lyricLines {
-    _lyricLines = lyricLines;
-    [self applyColors];
+- (void)setCutoutBand:(CGFloat)cutoutBand {
+    if (fabs(_cutoutBand - cutoutBand) < 0.01) return;
+    _cutoutBand = cutoutBand;
     [self setNeedsLayout];
 }
 
-- (void)setLine1:(NSString *)l1 line2:(NSString *)l2 {
-    if (![(l1 ?: @"") isEqualToString:self.label1.text ?: @""]) {
-        CATransition *t = [CATransition animation];
-        t.type = kCATransitionFade;
-        t.duration = 0.2;
-        [self.label1.layer addAnimation:t forKey:@"ik.fade"];
-        [self.label2.layer addAnimation:t forKey:@"ik.fade"];
-    }
-    self.label1.text = l1;
-    self.label1H.text = l1;
-    self.label2.text = l2;
-    self.label2H.text = l2;
-    self.label1Offset = 0;
-    self.label2Offset = 0;
-    self.sweepConfigured = NO;
-    self.sweepDuration = 0; // 没有时间信息：整行高亮
-    [self applySweep];
+- (void)setLyricLines:(NSInteger)lyricLines {
+    _lyricLines = lyricLines;
+    [self applyTextStyles];
+    [self setNeedsLayout];
 }
 
-- (void)setLyricCurrent:(NSString *)current next:(NSString *)next
-           lineDuration:(double)lineDuration elapsed:(double)elapsed playing:(BOOL)playing {
+- (void)setContentAlpha:(CGFloat)contentAlpha {
+    _contentAlpha = contentAlpha;
+    self.content.alpha = contentAlpha;
+}
+
+- (void)setOutlineOnly:(BOOL)outlineOnly {
+    _outlineOnly = outlineOnly;
+    self.backgroundColor = outlineOnly ? [UIColor clearColor] : [UIColor blackColor];
+    // 红色在白底和黑色的系统岛上都看得清
+    self.layer.borderColor = [UIColor colorWithRed:1.0 green:0.18 blue:0.33 alpha:1].CGColor;
+    self.layer.borderWidth = outlineOnly ? 1.5 : 0;
+}
+
+- (void)stopAnimations {
+    [self.layer removeAllAnimations];
+    [self.content.layer removeAllAnimations];
+}
+
+- (void)playInteractionPulse {
+    CGAffineTransform base = self.transform;
+    [UIView animateWithDuration:0.14 delay:0 options:UIViewAnimationOptionBeginFromCurrentState
+                     animations:^{
+        self.transform = CGAffineTransformScale(base, 1.035, 1.035);
+    } completion:^(BOOL finished) {
+        [UIView animateWithDuration:0.22 delay:0 options:UIViewAnimationOptionBeginFromCurrentState
+                         animations:^{ self.transform = base; } completion:nil];
+    }];
+}
+
+#pragma mark 文字
+
+- (void)setNotifTitle:(NSString *)title message:(NSString *)message {
+    self.textKind = IKTextKindNotif;
+    [self applyTextStyles];
+    [self.row1 setText:title change:IKLineChangeFade];
+    [self.row2 setText:message change:IKLineChangeFade];
+    [self.row1 setDuration:0 elapsed:0 playing:NO fill:NO];
+    [self.row2 setDuration:0 elapsed:0 playing:NO fill:NO];
+}
+
+- (void)setTitle:(NSString *)title subtitle:(NSString *)subtitle playing:(BOOL)playing {
+    self.textKind = IKTextKindPlain;
+    [self applyTextStyles];
+    [self.row1 setText:title change:IKLineChangeFade];
+    [self.row2 setText:subtitle change:IKLineChangeFade];
+    [self.row1 setDuration:0 elapsed:0 playing:playing fill:NO];
+    [self.row2 setDuration:0 elapsed:0 playing:playing fill:NO];
+}
+
+- (void)setLyric:(NSString *)lyric title:(NSString *)title
+    lineDuration:(double)lineDuration elapsed:(double)elapsed playing:(BOOL)playing {
+    self.textKind = IKTextKindLyric;
+    [self applyTextStyles];
     BOOL two = self.lyricLines >= 2;
-    BOOL changed = ![(current ?: @"") isEqualToString:(two ? self.label2.text : self.label1.text) ?: @""];
-    if (changed) {
-        // 换行：旧的一行向上滑出，新的一行从下面滑入（“淡入”效果时改为淡入）
-        CATransition *t = [CATransition animation];
-        if (self.lyricEffect == 2) {
-            t.type = kCATransitionFade;
-        } else {
-            t.type = kCATransitionPush;
-            t.subtype = kCATransitionFromTop;
-        }
-        t.duration = 0.32;
-        t.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
-        NSArray<UIView *> *changingViews = two
-            ? @[self.label2, self.label2H]
-            : @[self.label1, self.label1H];
-        [self removeLyricScrollAnimationsForViews:changingViews];
-        UILabel *changingLabel = two ? self.label2 : self.label1;
-        UILabel *changingHighlight = two ? self.label2H : self.label1H;
-        [UIView performWithoutAnimation:^{
-            [self setTrackOffset:0 label:changingLabel highlight:changingHighlight];
-        }];
-        for (UIView *v in changingViews) {
-            v.clipsToBounds = YES;
-            [v.layer addAnimation:t forKey:@"ik.line"];
-        }
-        if (two) self.label2Offset = 0;
-        else self.label1Offset = 0;
-        self.sweepConfigured = NO;
-    }
+    IKLineView *lyricRow = two ? self.row2 : self.row1;
+    // 换句的动画只作用在歌词这一行；歌名只有自己的文字变了才淡入一次
+    IKLineChange change = (self.lyricEffect == 2) ? IKLineChangeFade : IKLineChangePush;
     if (two) {
-        self.label1.text = next;
-        self.label1H.text = next;
-        self.label2.text = current;
-        self.label2H.text = current;
+        [self.row1 setText:title change:IKLineChangeFade];
+        [self.row1 setDuration:0 elapsed:0 playing:playing fill:NO];
     } else {
-        self.label1.text = current;
-        self.label1H.text = current;
-        self.label2.text = @"";
-        self.label2H.text = @"";
+        [self.row2 setText:@"" change:IKLineChangeNone];
+        [self.row2 setDuration:0 elapsed:0 playing:NO fill:NO];
     }
-
-    self.sweepDuration = lineDuration;
-    self.sweepPlaying = playing;
-    self.sweepPausedFraction = lineDuration > 0 ? MAX(0, MIN(1, elapsed / lineDuration)) : 1;
-    self.sweepStart = CACurrentMediaTime() - elapsed;
-    [self applySweep];
+    [lyricRow setText:lyric change:change];
+    [lyricRow setDuration:lineDuration elapsed:elapsed playing:playing fill:(self.lyricEffect == 1)];
 }
 
-// 当前行从左到右填色，同时让过长歌词沿填色进度平滑左移。
-- (CGFloat)textWidthForLabel:(UILabel *)label {
-    if (label.text.length == 0 || label.font == nil) return 0;
-    CGRect bounds = [label.text boundingRectWithSize:CGSizeMake(CGFLOAT_MAX, label.font.lineHeight)
-                                             options:NSStringDrawingUsesLineFragmentOrigin | NSStringDrawingUsesFontLeading
-                                          attributes:@{NSFontAttributeName: label.font}
-                                             context:nil];
-    return ceil(CGRectGetWidth(bounds)) + 2;
-}
-
-- (void)setTrackOffset:(CGFloat)offset label:(UILabel *)label highlight:(UILabel *)highlight {
-    CGRect frame = label.frame;
-    frame.origin.x = offset;
-    label.frame = frame;
-    frame = highlight.frame;
-    frame.origin.x = offset;
-    highlight.frame = frame;
-}
-
-- (void)removeLyricScrollAnimations {
-    [self removeLyricScrollAnimationsForViews:@[self.label1, self.label1H, self.label2, self.label2H]];
-}
-
-- (void)removeLyricScrollAnimationsForViews:(NSArray<UIView *> *)views {
-    // UIView 的 frame 动画使用 position/bounds 图层键，不会使用自定义名称。
-    // 保留 ik.line 和 ik.fade，避免清掉换句过渡。
-    for (UIView *view in views) {
-        [view.layer removeAnimationForKey:@"position"];
-        [view.layer removeAnimationForKey:@"bounds"];
-        [view.layer removeAnimationForKey:@"bounds.size"];
-        [view.layer removeAnimationForKey:@"frame"];
-    }
-}
-
-- (void)applySweep {
-    UILabel *highlight = self.lyricLines >= 2 ? self.label2H : self.label1H;
-    UILabel *track = self.lyricLines >= 2 ? self.label2 : self.label1;
-    UIView *viewport = self.lyricLines >= 2 ? self.label2Viewport : self.label1Viewport;
-    CALayer *host = highlight.layer;
-    BOOL hasTiming = self.sweepDuration > 0 && viewport.bounds.size.width > 0;
-    BOOL canFill = self.lyricEffect == 1 && hasTiming && !highlight.hidden;
-    BOOL canScroll = hasTiming && !track.hidden;
-    CGFloat h = highlight.bounds.size.height;
-    CGFloat textW = [self textWidthForLabel:track];
-    CGFloat full = MAX(0, textW);
-    CGFloat overflow = MAX(0, textW - viewport.bounds.size.width);
-
-    if (!canFill) {
-        self.label1H.layer.mask = nil;
-        self.label2H.layer.mask = nil;
-    } else {
-        CALayer *otherHost = host == self.label1H.layer ? self.label2H.layer : self.label1H.layer;
-        otherHost.mask = nil;
-    }
-    if (!canScroll || full <= 0 || h <= 0) {
-        [self removeLyricScrollAnimations];
-        if (!canScroll) {
-            self.label1Offset = 0;
-            self.label2Offset = 0;
-            [self setTrackOffset:0 label:self.label1 highlight:self.label1H];
-            [self setTrackOffset:0 label:self.label2 highlight:self.label2H];
-        }
-        self.sweepConfigured = NO;
-        return;
-    }
-
-    double frac = self.sweepPlaying
-        ? MAX(0, MIN(1, (CACurrentMediaTime() - self.sweepStart) / self.sweepDuration))
-        : self.sweepPausedFraction;
-    // 播放时文字从左端滚到右端，暂停时停在当前填色比例对应的位置。
-    CGFloat targetOffset = self.sweepPlaying ? -overflow : -overflow * frac;
-    BOOL sameSweep = self.sweepConfigured
-        && self.configuredSweepPlaying == self.sweepPlaying
-        && fabs(self.configuredSweepStart - self.sweepStart) < 0.05
-        && ((!canFill && host.mask == nil) || (canFill && host.mask != nil));
-
-    if (!self.sweepMask) {
-        self.sweepMask = [CALayer layer];
-        self.sweepMask.backgroundColor = [UIColor blackColor].CGColor;
-        self.sweepMask.anchorPoint = CGPointZero;
-    }
-    CALayer *mask = self.sweepMask;
-    if (!sameSweep) {
-        // 起点由歌词时钟决定，不读取 presentation layer，避免换句归零和布局
-        // 重配依赖 Core Animation 的事务提交时序。
-        CGFloat currentOffset = -overflow * frac;
-        [self removeLyricScrollAnimations];
-        [UIView performWithoutAnimation:^{
-            [self setTrackOffset:currentOffset label:track highlight:highlight];
-        }];
-        if (canFill) {
-            [CATransaction begin];
-            [CATransaction setDisableActions:YES];
-            [mask removeAllAnimations];
-            mask.position = CGPointZero;
-            mask.bounds = CGRectMake(0, 0, full, h);
-            mask.transform = CATransform3DMakeScale(frac, 1, 1);
-            host.mask = mask;
-            [CATransaction commit];
-        }
-
-        if (self.sweepPlaying && frac < 1) {
-            if (canFill) {
-                CABasicAnimation *fill = [CABasicAnimation animationWithKeyPath:@"transform.scale.x"];
-                fill.fromValue = @(frac);
-                fill.toValue = @1.0;
-                fill.duration = self.sweepDuration * (1 - frac);
-                fill.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionLinear];
-                fill.fillMode = kCAFillModeForwards;
-                fill.removedOnCompletion = NO;
-                [mask addAnimation:fill forKey:@"ik.sweep"];
-            }
-
-            CGFloat *storedOffset = self.lyricLines >= 2 ? &_label2Offset : &_label1Offset;
-            *storedOffset = targetOffset;
-            NSTimeInterval remaining = MAX(0.05, self.sweepDuration * (1 - frac));
-            [UIView animateWithDuration:remaining delay:0
-                                options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionCurveLinear | UIViewAnimationOptionAllowUserInteraction
-                             animations:^{
-                [self setTrackOffset:targetOffset label:track highlight:highlight];
-            } completion:nil];
-        } else {
-            if (self.lyricLines >= 2) self.label2Offset = targetOffset;
-            else self.label1Offset = targetOffset;
-            [self setTrackOffset:targetOffset label:track highlight:highlight];
-        }
-        self.configuredSweepStart = self.sweepStart;
-        self.configuredSweepPlaying = self.sweepPlaying;
-        self.sweepConfigured = YES;
-    }
-}
+#pragma mark 通知、音柱、进度环
 
 - (void)setNotifIcon:(UIImage *)icon appName:(NSString *)app round:(BOOL)round {
     self.iconView.image = icon;
@@ -584,7 +734,7 @@
         self.iconView.alpha = 1;
     } completion:nil];
 
-    NSArray<UIView *> *texts = @[self.label1, self.label2, self.appLabel];
+    NSArray<UIView *> *texts = @[self.row1, self.row2, self.appLabel];
     for (NSUInteger idx = 0; idx < texts.count; idx++) {
         UIView *v = texts[idx];
         v.transform = CGAffineTransformMakeTranslation(0, 10);
@@ -596,44 +746,13 @@
     }
 }
 
-- (void)playInteractionPulse {
-    [self.layer removeAnimationForKey:@"ik.interactionPulse"];
-    CASpringAnimation *pulse = [CASpringAnimation animationWithKeyPath:@"transform.scale"];
-    pulse.fromValue = @1.0;
-    pulse.toValue = @1.035;
-    pulse.initialVelocity = 0.4;
-    pulse.damping = 12;
-    pulse.stiffness = 180;
-    pulse.mass = 1;
-    pulse.duration = 0.42;
-    pulse.autoreverses = YES;
-    pulse.removedOnCompletion = YES;
-    [self.layer addAnimation:pulse forKey:@"ik.interactionPulse"];
-}
-
-- (void)layoutTextViewport:(UIView *)viewport label:(UILabel *)label highlight:(UILabel *)highlight
-                     frame:(CGRect)frame hidden:(BOOL)hidden notification:(BOOL)notification offset:(CGFloat)offset {
-    viewport.frame = frame;
-    viewport.hidden = hidden;
-    label.numberOfLines = 1;
-    highlight.numberOfLines = 1;
-    BOOL isCurrentLyric = !notification && self.state == IKStateLyric && self.sweepDuration > 0
-        && ((self.lyricLines < 2 && viewport == self.label1Viewport)
-            || (self.lyricLines >= 2 && viewport == self.label2Viewport));
-    label.lineBreakMode = isCurrentLyric ? NSLineBreakByClipping : NSLineBreakByTruncatingTail;
-    highlight.lineBreakMode = NSLineBreakByClipping;
-
-    CGFloat textWidth = [self textWidthForLabel:label];
-    CGFloat trackWidth = isCurrentLyric ? MAX(frame.size.width, textWidth) : MAX(0, frame.size.width);
-    CGRect trackFrame = CGRectMake(offset, 0, trackWidth, frame.size.height);
-    label.frame = trackFrame;
-    highlight.frame = trackFrame;
-}
+#pragma mark 布局
 
 - (void)layoutSubviews {
     [super layoutSubviews];
     CGFloat W = self.bounds.size.width, H = self.bounds.size.height;
-    self.layer.cornerRadius = MIN(H / 2, 36);
+    CGFloat radius = MIN(H / 2, self.coversCutout ? 36 : 29);
+    self.layer.cornerRadius = radius;
 
     BOOL compact = (self.state == IKStateMusicCompact);
     BOOL lyric   = (self.state == IKStateLyric);
@@ -644,91 +763,54 @@
     self.barsView.hidden = !(compact || lyric);
     self.iconView.hidden = !notif;
     self.appLabel.hidden = !notif;
-    self.label1.hidden   = !(lyric || notif);
-    self.label2.hidden   = !two;
-    self.label1H.hidden  = self.label1.hidden || notif || self.sweepDuration <= 0
-        || (lyric && self.lyricLines >= 2);
-    self.label2H.hidden  = self.label2.hidden || notif || self.sweepDuration <= 0
-        || !(lyric && self.lyricLines >= 2);
+    self.row1.hidden     = !(lyric || notif);
+    self.row2.hidden     = !two;
 
-    [self layoutRingWithCornerRadius:(self.coversCutout ? MIN(H / 2, 36) : MIN(H / 2, 29))];
+    [self layoutRingWithCornerRadius:radius];
 
     if (!self.coversCutout) {
         // 独立胶囊：左边封面或图标，中间文字，右边音柱
-        self.layer.cornerRadius = MIN(H / 2, 29);
         if (compact) {
             self.cover.frame = CGRectMake(4, (H - 26) / 2, 26, 26);
             self.barsView.frame = CGRectMake(W - 12 - 18, (H - 16) / 2, 18, 16);
-            [self layoutTextViewport:self.label1Viewport label:self.label1 highlight:self.label1H
-                               frame:CGRectZero hidden:YES notification:NO offset:0];
-            [self layoutTextViewport:self.label2Viewport label:self.label2 highlight:self.label2H
-                               frame:CGRectZero hidden:YES notification:NO offset:0];
         } else if (lyric) {
             CGFloat c = H - 12;
             self.cover.frame = CGRectMake(6, 6, c, c);
             self.barsView.frame = CGRectMake(W - 16 - 18, (H - 16) / 2, 18, 16);
             CGFloat x = 6 + c + 10, w = W - x - 16 - 18 - 10;
-            [self layoutTextViewport:self.label1Viewport label:self.label1 highlight:self.label1H
-                               frame:(two ? CGRectMake(x, H / 2 - 21, w, 22) : CGRectMake(x, (H - 22) / 2, w, 22))
-                              hidden:NO notification:NO offset:self.label1Offset];
-            [self layoutTextViewport:self.label2Viewport label:self.label2 highlight:self.label2H
-                               frame:(two ? CGRectMake(x, H / 2 + 2, w, 18) : CGRectZero)
-                              hidden:!two notification:NO offset:self.label2Offset];
+            if (two) {
+                self.row1.frame = CGRectMake(x, H / 2 - 21, w, 22);
+                self.row2.frame = CGRectMake(x, H / 2 + 2, w, 18);
+            } else {
+                self.row1.frame = CGRectMake(x, (H - 22) / 2, w, 22);
+            }
         } else if (notif) {
             self.iconView.frame = CGRectMake(8, (H - 42) / 2, 42, 42);
             CGFloat x = 60, w = W - x - 18;
             self.appLabel.frame = CGRectMake(W - 18 - 96, H / 2 - 19, 96, 16);
-            [self layoutTextViewport:self.label1Viewport label:self.label1 highlight:self.label1H
-                               frame:CGRectMake(x, H / 2 - 21, MAX(0, w - 102), 22)
-                              hidden:NO notification:YES offset:0];
-            [self layoutTextViewport:self.label2Viewport label:self.label2 highlight:self.label2H
-                               frame:CGRectMake(x, H / 2 + 2, MAX(0, w), 18)
-                              hidden:NO notification:YES offset:0];
-        } else {
-            [self layoutTextViewport:self.label1Viewport label:self.label1 highlight:self.label1H
-                               frame:CGRectZero hidden:YES notification:NO offset:0];
-            [self layoutTextViewport:self.label2Viewport label:self.label2 highlight:self.label2H
-                               frame:CGRectZero hidden:YES notification:NO offset:0];
+            self.row1.frame = CGRectMake(x, H / 2 - 21, w - 102, 22);
+            self.row2.frame = CGRectMake(x, H / 2 + 2, w, 18);
         }
-        self.iconView.layer.cornerRadius = self.iconRound ? self.iconView.bounds.size.width / 2 : 11;
-        [self applySweep];
-        return;
-    }
-
-    // 开孔占据顶部 37pt 高、居中 cutoutWidth 宽的区域，文字一律放到它下面
-    CGFloat band = self.cutoutHeight > 0 ? self.cutoutHeight : 37;
-    if (compact) {
-        self.cover.frame = CGRectMake(5, (H - 27) / 2, 27, 27);
-        self.barsView.frame = CGRectMake(W - 14 - 18, (H - 16) / 2, 18, 16);
-    } else if (lyric) {
-        self.cover.frame = CGRectMake(12, (H - 52) / 2, 52, 52);
-        self.barsView.frame = CGRectMake(W - 20 - 18, (band - 16) / 2, 18, 16);
-        CGFloat textWidth = MAX(0, W - 76 - 18);
-        [self layoutTextViewport:self.label1Viewport label:self.label1 highlight:self.label1H
-                           frame:(self.lyricLines >= 2 ? CGRectMake(76, band + 6, textWidth, 22) : CGRectMake(76, band + 17, textWidth, 22))
-                          hidden:NO notification:NO offset:self.label1Offset];
-        [self layoutTextViewport:self.label2Viewport label:self.label2 highlight:self.label2H
-                           frame:(self.lyricLines >= 2 ? CGRectMake(76, band + 28, textWidth, 18) : CGRectZero)
-                          hidden:self.lyricLines < 2 notification:NO offset:self.label2Offset];
-    } else if (notif) {
-        self.iconView.frame = CGRectMake(14, (H - 44) / 2, 44, 44);
-        CGFloat ax = W / 2 + self.cutoutWidth / 2 + 6;
-        self.appLabel.frame = CGRectMake(ax, (band - 16) / 2, MAX(0, W - ax - 16), 16);
-        CGFloat textWidth = MAX(0, W - 70 - 18);
-        [self layoutTextViewport:self.label1Viewport label:self.label1 highlight:self.label1H
-                           frame:CGRectMake(70, band + 6, textWidth, 22)
-                          hidden:NO notification:YES offset:0];
-        [self layoutTextViewport:self.label2Viewport label:self.label2 highlight:self.label2H
-                           frame:CGRectMake(70, band + 28, textWidth, 18)
-                          hidden:NO notification:YES offset:0];
     } else {
-        [self layoutTextViewport:self.label1Viewport label:self.label1 highlight:self.label1H
-                           frame:CGRectZero hidden:YES notification:NO offset:0];
-        [self layoutTextViewport:self.label2Viewport label:self.label2 highlight:self.label2H
-                           frame:CGRectZero hidden:YES notification:NO offset:0];
+        // 开孔占据顶部 band 高、居中 cutoutWidth 宽的区域，文字一律放到它下面
+        CGFloat band = self.cutoutBand > 0 ? self.cutoutBand : 37;
+        if (compact) {
+            self.cover.frame = CGRectMake(5, (H - 27) / 2, 27, 27);
+            self.barsView.frame = CGRectMake(W - 14 - 18, (H - 16) / 2, 18, 16);
+        } else if (lyric) {
+            self.cover.frame = CGRectMake(12, (H - 52) / 2, 52, 52);
+            self.barsView.frame = CGRectMake(W - 20 - 18, (band - 16) / 2, 18, 16);
+            self.row1.frame = CGRectMake(76, band + 6, W - 76 - 18, 22);
+            self.row2.frame = CGRectMake(76, band + 28, W - 76 - 18, 18);
+        } else if (notif) {
+            self.iconView.frame = CGRectMake(14, (H - 44) / 2, 44, 44);
+            CGFloat ax = W / 2 + self.cutoutWidth / 2 + 6;
+            self.appLabel.frame = CGRectMake(ax, (band - 16) / 2, MAX(0, W - ax - 16), 16);
+            self.row1.frame = CGRectMake(70, band + 6, W - 70 - 18, 22);
+            self.row2.frame = CGRectMake(70, band + 28, W - 70 - 18, 18);
+        }
     }
     self.iconView.layer.cornerRadius = self.iconRound ? self.iconView.bounds.size.width / 2 : 11;
-    [self applySweep];
 }
 
 @end

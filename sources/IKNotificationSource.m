@@ -122,6 +122,18 @@ static NSString *IKValueShape(id value) {
 }
 
 static UIImage *IKImageFromValueEnhanced(id value);
+static UIImage *IKImageFromRemoteURL(NSURL *url);
+static void IKResolveRemoteImage(NSURL *url, void (^completion)(UIImage *image));
+
+static Class IKINImageClass(void) {
+    static Class imageClass;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        dlopen("/System/Library/Frameworks/Intents.framework/Intents", RTLD_LAZY);
+        imageClass = NSClassFromString(@"INImage");
+    });
+    return imageClass;
+}
 
 static UIImage *IKImageFromNamedValue(NSString *name) {
     if (name.length == 0) return nil;
@@ -193,6 +205,44 @@ static UIImage *IKImageFromBundleName(NSString *name, NSBundle *bundle) {
     return nil;
 }
 
+static void IKAppendIconNames(NSMutableArray<NSString *> *names, id value) {
+    if ([value isKindOfClass:[NSString class]]) {
+        if ([(NSString *)value length] > 0 && ![names containsObject:value]) [names addObject:value];
+    } else if ([value isKindOfClass:[NSArray class]]) {
+        for (id item in (NSArray *)value) IKAppendIconNames(names, item);
+    }
+}
+
+// BulletinBoard 的头像代理并不总能被悬浮进程读取。至少保证通知有应用图标，
+// 同时保留代理头像的异步替换机会。优先读应用自己的 CFBundle 图标声明，
+// 再调用系统已有的图标解析入口。
+static UIImage *IKApplicationIconFromBundle(NSBundle *bundle, NSString *bundleID) {
+    NSMutableArray<NSString *> *names = [NSMutableArray array];
+    NSDictionary *info = bundle.infoDictionary;
+    IKAppendIconNames(names, info[@"CFBundleIconName"]);
+    IKAppendIconNames(names, info[@"CFBundleIconFiles"]);
+    for (NSString *key in @[@"CFBundleIcons", @"CFBundleIcons~ipad"]) {
+        NSDictionary *icons = [info[key] isKindOfClass:[NSDictionary class]] ? info[key] : nil;
+        NSDictionary *primary = [icons[@"CFBundlePrimaryIcon"] isKindOfClass:[NSDictionary class]]
+            ? icons[@"CFBundlePrimaryIcon"] : nil;
+        IKAppendIconNames(names, primary[@"CFBundleIconName"]);
+        IKAppendIconNames(names, primary[@"CFBundleIconFiles"]);
+    }
+    for (NSString *name in names) {
+        UIImage *image = IKImageFromBundleName(name, bundle);
+        if (image) return image;
+    }
+
+    SEL iconSelector = NSSelectorFromString(@"_applicationIconImageForBundleIdentifier:format:scale:");
+    if (bundleID.length && [UIImage respondsToSelector:iconSelector]) {
+        @try {
+            return ((UIImage *(*)(id, SEL, id, NSUInteger, CGFloat))objc_msgSend)(
+                [UIImage class], iconSelector, bundleID, 2, [UIScreen mainScreen].scale);
+        } @catch (__unused NSException *e) {}
+    }
+    return nil;
+}
+
 // 在一个对象的属性里找一张图：名字里带 image/avatar/thumbnail 的 NSData、UIImage，或指向本地文件的 URL/路径
 static UIImage *IKFindImage(id obj) {
     if (!obj) return nil;
@@ -224,7 +274,205 @@ static UIImage *IKImageFromValueEnhanced(id value) {
     if ([value isKindOfClass:[NSURL class]] && [(NSURL *)value isFileURL]) {
         return [UIImage imageWithContentsOfFile:[(NSURL *)value path]];
     }
+    if ([value isKindOfClass:[NSURL class]] && [[[(NSURL *)value scheme] lowercaseString] isEqualToString:@"data"]) {
+        NSString *absolute = [(NSURL *)value absoluteString];
+        NSRange comma = [absolute rangeOfString:@","];
+        if (comma.location != NSNotFound) {
+            NSString *metadata = [absolute substringToIndex:comma.location];
+            NSString *payload = [absolute substringFromIndex:comma.location + 1];
+            NSDataBase64DecodingOptions options = [metadata.lowercaseString containsString:@";base64"]
+                ? NSDataBase64DecodingIgnoreUnknownCharacters : 0;
+            NSData *data = options ? [[NSData alloc] initWithBase64EncodedString:payload options:options]
+                                   : [[payload stringByRemovingPercentEncoding] dataUsingEncoding:NSUTF8StringEncoding];
+            return [UIImage imageWithData:data];
+        }
+    }
+    // INImage 通常是惰性对象。某些系统版本会在 imageWithURL: 后暴露 imageData，
+    // 另一些版本只暴露 imageURL，两个属性都尝试一次。
+    id imageData = IKValue(value, @"imageData");
+    if (imageData && imageData != value) {
+        UIImage *image = IKImageFromValueEnhanced(imageData);
+        if (image) return image;
+    }
+    id imageURL = IKValue(value, @"imageURL");
+    if (imageURL && imageURL != value) {
+        UIImage *image = IKImageFromValueEnhanced(imageURL);
+        if (image) return image;
+    }
     if ([value isKindOfClass:[NSString class]]) return IKImageFromNamedValue(value);
+    return nil;
+}
+
+static UIImage *IKImageFromINImageObject(id imageObject) {
+    if (!imageObject) return nil;
+    id imageData = IKValue(imageObject, @"imageData");
+    if ([imageData isKindOfClass:[UIImage class]]) return imageData;
+    if ([imageData isKindOfClass:[NSData class]]) return [UIImage imageWithData:imageData];
+    id image = IKValue(imageObject, @"image");
+    if ([image isKindOfClass:[UIImage class]]) return image;
+    return nil;
+}
+
+// BBCommunicationContext 在微信通知里给的是 intents-remote-image-proxy URL。
+// 这个 URL 不是本地文件名，先尝试 Intents 的运行时解码器，再尝试 URL 内嵌的 data/file/HTTP 地址。
+// 解析放在后台队列调用，避免通知主线程被网络或系统代理阻塞。
+static UIImage *IKImageFromRemoteURL(NSURL *url) {
+    if (!url) return nil;
+    Class imageClass = IKINImageClass();
+    SEL sizedImageWithURL = NSSelectorFromString(@"imageWithURL:width:height:");
+    SEL imageWithURL = NSSelectorFromString(@"imageWithURL:");
+    if (imageClass) {
+        id imageObject = nil;
+        if ([imageClass respondsToSelector:sizedImageWithURL]) {
+            imageObject = ((id (*)(id, SEL, id, double, double))objc_msgSend)(
+                imageClass, sizedImageWithURL, url, 128.0, 128.0);
+        }
+        if (!imageObject && [imageClass respondsToSelector:imageWithURL]) {
+            imageObject = ((id (*)(id, SEL, id))objc_msgSend)(imageClass, imageWithURL, url);
+        }
+        UIImage *image = IKImageFromINImageObject(imageObject);
+        if (image) return image;
+    }
+
+    NSString *scheme = [[url scheme] lowercaseString];
+    if ([scheme isEqualToString:@"file"] || [scheme isEqualToString:@"data"]
+        || [scheme isEqualToString:@"http"] || [scheme isEqualToString:@"https"]
+        || [scheme isEqualToString:@"intents-remote-image-proxy"]) {
+        NSData *data = [NSData dataWithContentsOfURL:url options:NSDataReadingMappedIfSafe error:nil];
+        UIImage *image = [UIImage imageWithData:data];
+        if (image) return image;
+    }
+
+    NSURLComponents *components = [NSURLComponents componentsWithURL:url resolvingAgainstBaseURL:NO];
+    for (NSURLQueryItem *item in components.queryItems) {
+        NSString *key = item.name.lowercaseString;
+        NSString *value = item.value;
+        if (![key containsString:@"url"] && ![key containsString:@"uri"] && ![key containsString:@"image"]
+            && ![key containsString:@"data"]) continue;
+        if ([key containsString:@"data"]) {
+            NSData *data = [[NSData alloc] initWithBase64EncodedString:value options:NSDataBase64DecodingIgnoreUnknownCharacters];
+            UIImage *image = [UIImage imageWithData:data];
+            if (image) return image;
+        }
+        NSURL *embedded = [NSURL URLWithString:[value stringByRemovingPercentEncoding] ?: value];
+        UIImage *image = IKImageFromRemoteURL(embedded);
+        if (image) return image;
+    }
+    return nil;
+}
+
+// 代理头像可能只能由 INImage 异步取回。优先调用系统对象的取图回调，
+// 再用 NSURLSession 处理 file/data/http 以及系统注册的自定义 URL scheme。
+static void IKResolveRemoteImage(NSURL *url, void (^completion)(UIImage *image)) {
+    if (!url || !completion) return;
+    NSObject *lock = [NSObject new];
+    __block BOOL finished = NO;
+    void (^finish)(UIImage *) = ^(UIImage *resolved) {
+        @synchronized (lock) {
+            if (finished) return;
+            finished = YES;
+        }
+        completion(resolved);
+    };
+
+    Class imageClass = IKINImageClass();
+    SEL sizedImageWithURL = NSSelectorFromString(@"imageWithURL:width:height:");
+    SEL imageWithURL = NSSelectorFromString(@"imageWithURL:");
+    if (imageClass && ([imageClass respondsToSelector:sizedImageWithURL]
+                       || [imageClass respondsToSelector:imageWithURL])) {
+        id imageObject = nil;
+        @try {
+            if ([imageClass respondsToSelector:sizedImageWithURL]) {
+                imageObject = ((id (*)(id, SEL, id, double, double))objc_msgSend)(
+                    imageClass, sizedImageWithURL, url, 128.0, 128.0);
+            } else {
+                imageObject = ((id (*)(id, SEL, id))objc_msgSend)(imageClass, imageWithURL, url);
+            }
+        } @catch (__unused NSException *e) {}
+
+        UIImage *image = IKImageFromINImageObject(imageObject);
+        if (image) {
+            finish(image);
+            return;
+        }
+
+        // iOS 版本间这个私有取图入口的 selector 名称有差异，按实际存在的
+        // 方法调用。回调的第一个参数始终是 NSData 或 UIImage，额外参数会被忽略。
+        for (NSString *name in @[
+            @"retrieveImageDataWithSize:completion:",
+            @"retrieveImageDataWithSize:completionHandler:",
+            @"requestImageDataWithSize:completion:"
+        ]) {
+            SEL retrieve = NSSelectorFromString(name);
+            if (!imageObject || ![imageObject respondsToSelector:retrieve]) continue;
+            void (^handler)(id) = ^(id value) {
+                finish(IKImageFromValueEnhanced(value));
+            };
+            @try {
+                ((void (*)(id, SEL, CGSize, void (^)(id)))objc_msgSend)(
+                    imageObject, retrieve, CGSizeMake(128, 128), handler);
+                // INImage 的代理回调在部分系统上不会返回。先给系统代理一点时间，
+                // 再尝试 URL 加载，最后在有限时间内结束，避免通知一直持有解析任务。
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.2 * NSEC_PER_SEC)),
+                               dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+                    if (finished) return;
+                    UIImage *fallback = IKImageFromRemoteURL(url);
+                    if (fallback) finish(fallback);
+                });
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC)),
+                               dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+                    finish(nil);
+                });
+                return;
+            } @catch (__unused NSException *e) {}
+        }
+    }
+
+    UIImage *fallback = IKImageFromRemoteURL(url);
+    if (fallback) {
+        finish(fallback);
+        return;
+    }
+
+    NSURLRequest *request = [NSURLRequest requestWithURL:url
+                                             cachePolicy:NSURLRequestReloadIgnoringLocalCacheData
+                                         timeoutInterval:4.0];
+    NSURLSessionDataTask *task = [[NSURLSession sharedSession]
+        dataTaskWithRequest:request
+           completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+        UIImage *image = (!error && data.length > 0) ? [UIImage imageWithData:data] : nil;
+        finish(image);
+    }];
+    [task resume];
+}
+
+static NSURL *IKRemoteImageURLFromValue(id value, NSInteger depth) {
+    if (!value || depth > 3) return nil;
+    if ([value isKindOfClass:[NSURL class]]) {
+        NSString *scheme = [[(NSURL *)value scheme] lowercaseString];
+        if ([scheme isEqualToString:@"intents-remote-image-proxy"] || [scheme isEqualToString:@"http"]
+            || [scheme isEqualToString:@"https"] || [scheme isEqualToString:@"file"]
+            || [scheme isEqualToString:@"data"]) return value;
+        return nil;
+    }
+    if ([value isKindOfClass:[NSString class]]) {
+        if ([(NSString *)value hasPrefix:@"/"]) {
+            return IKRemoteImageURLFromValue([NSURL fileURLWithPath:(NSString *)value], depth + 1);
+        }
+        NSURL *url = [NSURL URLWithString:(NSString *)value];
+        return IKRemoteImageURLFromValue(url, depth + 1);
+    }
+    if ([value isKindOfClass:[NSDictionary class]]) {
+        for (NSString *key in @[@"URL", @"url", @"contentURL", @"imageURL", @"thumbnailURL", @"fileURL", @"uri", @"data", @"path"]) {
+            NSURL *url = IKRemoteImageURLFromValue(((NSDictionary *)value)[key], depth + 1);
+            if (url) return url;
+        }
+        return nil;
+    }
+    for (NSString *key in @[@"URL", @"contentURL", @"imageURL", @"thumbnailURL", @"fileURL", @"thumbnailGeneratorUserInfo"]) {
+        NSURL *url = IKRemoteImageURLFromValue(IKValue(value, key), depth + 1);
+        if (url) return url;
+    }
     return nil;
 }
 
@@ -413,6 +661,13 @@ static UIImage *IKFindImageEnhanced(id obj, NSInteger depth) {
             else if ((avatar = IKFindImageEnhanced(attachments, 0))) avatarFrom = @"additionalAttachments";
             else if ((avatar = IKFindImageEnhanced(IKValue(bulletin, @"userInfo"), 0))) avatarFrom = @"userInfo";
         } @catch (__unused NSException *e) {}
+        if (!avatar) {
+            UIImage *appIcon = IKApplicationIconFromBundle(sectionBundle, bundleID);
+            if (appIcon) {
+                avatar = appIcon;
+                avatarFrom = @"applicationIcon";
+            }
+        }
         IKNotifLog(@"头像：%@ from=%@ imageName.len=%lu bundle=%d candidates=sender:%d context:%d content:%d attachment:%d accessory:%d icon:%d",
                    bundleID, avatarFrom, (unsigned long)imageName.length, sectionBundle != nil,
                    sender != nil, context != nil, content != nil, attachment != nil,
@@ -439,11 +694,40 @@ static UIImage *IKFindImageEnhanced(id obj, NSInteger depth) {
             IKNotifLog(@"结构 icon=%@", IKDescribeProperties(icon));
         }
 
-        [ctl showNotificationWithBundle:bundleID
-                                appName:appName ?: bundleID
-                                  title:title.length ? title : subtitle
-                                message:message
-                                 avatar:avatar];
+        BOOL avatarIsSender = avatar != nil && ![avatarFrom isEqualToString:@"applicationIcon"];
+        NSUInteger notificationToken = [ctl showNotificationWithBundle:bundleID
+                                                                appName:appName ?: bundleID
+                                                                  title:title.length ? title : subtitle
+                                                                message:message
+                                                                 avatar:avatar
+                                                         avatarIsSender:avatarIsSender];
+
+        // 微信的 contentURL 是系统代理 URL，头像需要异步从代理解码，避免阻塞 BBObserver 主线程。
+        if (!avatar || [avatarFrom isEqualToString:@"applicationIcon"]) {
+            id contentURL = IKValue(context, @"contentURL");
+            NSURL *remoteURL = IKRemoteImageURLFromValue(contentURL, 0);
+            if (!remoteURL) remoteURL = IKRemoteImageURLFromValue(context, 0);
+            if (!remoteURL) remoteURL = IKRemoteImageURLFromValue(bulletin, 0);
+            if (!remoteURL) remoteURL = IKRemoteImageURLFromValue(attachment, 0);
+            if (!remoteURL) remoteURL = IKRemoteImageURLFromValue(attachments, 0);
+            if (remoteURL) {
+                IKNotifLog(@"头像异步解析：%@ scheme=%@", bundleID, remoteURL.scheme ?: @"-");
+                dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+                    IKResolveRemoteImage(remoteURL, ^(UIImage *resolved) {
+                        dispatch_async(dispatch_get_main_queue(), ^{
+                        if (resolved) {
+                            [ctl updateNotificationAvatar:resolved forBundle:bundleID
+                                                     title:title.length ? title : subtitle message:message
+                                                     token:notificationToken];
+                            IKNotifLog(@"头像异步解析结果：%@ image=1", bundleID);
+                        } else {
+                            IKNotifLog(@"头像异步解析结果：%@ image=0", bundleID);
+                        }
+                        });
+                    });
+                });
+            }
+        }
     });
 }
 
