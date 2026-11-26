@@ -404,11 +404,6 @@
     return ceil(CGRectGetWidth(bounds)) + 2;
 }
 
-- (CGFloat)presentationOffsetForLabel:(UILabel *)label fallback:(CGFloat)fallback {
-    CALayer *presentation = label.layer.presentationLayer;
-    return presentation ? presentation.frame.origin.x : fallback;
-}
-
 - (void)setTrackOffset:(CGFloat)offset label:(UILabel *)label highlight:(UILabel *)highlight {
     CGRect frame = label.frame;
     frame.origin.x = offset;
@@ -482,12 +477,13 @@
     }
     CALayer *mask = self.sweepMask;
     if (!sameSweep) {
-        CGFloat currentOffset = [self presentationOffsetForLabel:track
-                                                             fallback:(self.lyricLines >= 2 ? self.label2Offset : self.label1Offset)];
-        // 先读取 presentation layer，再移除 UIView 动画，否则暂停或改色时
-        // 会丢失当前滚动位置，文字瞬间跳到旧的模型值。
+        // 起点由歌词时钟决定，不读取 presentation layer，避免换句归零和布局
+        // 重配依赖 Core Animation 的事务提交时序。
+        CGFloat currentOffset = -overflow * frac;
         [self removeLyricScrollAnimations];
-        [self setTrackOffset:currentOffset label:track highlight:highlight];
+        [UIView performWithoutAnimation:^{
+            [self setTrackOffset:currentOffset label:track highlight:highlight];
+        }];
         if (canFill) {
             [CATransaction begin];
             [CATransaction setDisableActions:YES];
