@@ -64,7 +64,7 @@ QQ 音乐、网易云音乐各有一个适配器。0.6.4 可以使用宿主播�
 
 `IslandKit-PlaybackDiagnostics.dylib` 从 0.6.5 起带探针，两个适配器不带。库的构造函数只在 bundle ID 是 `com.tencent.QQMusic` 或 `com.netease.cloudmusic` 的进程里启动探针，一个进程只启动一次。
 
-类清单在启动 6 秒后采一次，第一次发布“正在播放”后 3 秒再采一次。
+类清单在启动 6 秒后采一次，确认开始播放后 3 秒再采一次。“开始播放”指播放器发布了大于 0 的速率；没有发布速率时，指同一首歌的进度跟着时间往前走了。只发布歌名（预载下一首）、速率为 0 或进度不动，都不算，这次采样会留到真正播放时。播放器既不发布速率、进度也不更新时，不做播放采样，只有启动采样。
 
 - 范围是路径在 `.app` 目录里的镜像，也就是主程序和包内框架。系统库和 IslandKit 自己的库不算。
 - 类名含 lyric、lrc、qrc、yrc、krc（不分大小写）的类入选。只是因为 `QRCode` 才含 qrc 的不算。
@@ -73,7 +73,7 @@ QQ 音乐、网易云音乐各有一个适配器。0.6.4 可以使用宿主播�
 - 上限：600 个类带成员，再有 1500 个只列类名，更多的只计入 `dropped`。每个类每种成员最多 300 条。名字留 160 个字符，类型编码留 200 个，截断的以 `~` 结尾。成员明细总共约 640 KB，用完后其余的类只列名字，并标 `budgetLimited=1`。
 - 名字含 View、Cell、Button、Label、Layer 的类（ViewModel 除外）排在后面，先把额度给更像数据和逻辑的类。
 - 第二次采样里新出现的类标 `late`，通常来自放歌时才加载的框架。
-- 采样前写 `lyric-probe-sampling.plist`，采完删除。同一个播放器版本连续两次没采完（例如采样时进程被杀）就不再尝试，导出里会有一行 `class sampling unfinished`。
+- 采样前在 `lyric-probe-sampling.plist` 里给这次采样（`launch` 或 `playback`）记一次，采完只清掉这一种。同一个播放器版本里，某一种连续两次没采完（例如采样时进程被杀），这一种就不再尝试，另一种照常采。导出里会有一行 `class sampling unfinished launch=… playback=…`。
 
 字段变化的时刻取自 `-[MPNowPlayingInfoCenter setNowPlayingInfo:]`。探针把这个方法包了一层：先读系统运行时间，调用原来的实现，再比较标题、歌手、专辑和上一次是否相同。
 
@@ -85,32 +85,36 @@ QQ 音乐、网易云音乐各有一个适配器。0.6.4 可以使用宿主播�
 
 ### 悬浮端的时刻
 
-`IKMusicCenter` 收到系统的“正在播放”变化时，用同一套规则（`IKLyricEventLog`）记一条，时间取开始读取这次变化的那一刻。文件是 `/var/mobile/Library/IslandKit/lyric-hud-events-<小写 bundle ID>.plist`。两边读的是同一个系统运行时间，可以直接相减。
+`IKMusicCenter` 收到系统的“正在播放”变化时，用同一套规则（`IKLyricEventLog`）记一条。时间取这一轮播放信息字典送到悬浮端的那一刻。归属的播放器取同一轮请求返回的应用 ID：字典先到、应用 ID 后到时，等应用 ID 到了再记，而且每轮只记一次。被新一轮请求取代的旧轮次只要先完成，照样记；比已记录的轮次更旧的结果丢弃，避免把旧状态重放一遍。文件是 `/var/mobile/Library/IslandKit/lyric-hud-events-<小写 bundle ID>.plist`。两边读的是同一个系统运行时间，可以直接相减。
+
+应用 ID 和字典是两次独立的系统请求。如果恰好在两次请求之间换了播放器，仍可能把一条记到错误的播放器上；系统接口没有办法把两者绑在一起。
 
 ### 容器里的文件形状
 
 点“导出播放诊断”时，设置 App 在后台线程检查两款播放器数据容器里的 `Documents`、`Library`、`tmp`。这一步不需要注入。
 
 - 文件名含关键词，或者它上面任意一级目录名含关键词，就算匹配。
-- 每行是同一目录下脱敏后同名的一组文件：相对路径、真实扩展名、文件数、大小范围、文件头类型。文件头类型沿用 `IKLyricFileShape`，读前 512 字节判断是 `timed-text`、`text`、`binary` 还是别的，不保存内容。每行最多读 8 个文件。
-- 名字含关键词的目录单独列一行，以 `directory` 结尾。
-- 脱敏规则按路径的每一段执行：
+- 每行是同一目录下脱敏后同名的一组文件：相对路径、扩展名、文件数、大小范围、文件头类型。文件头读前 512 字节，判断是 `timed-text`、`text`、`binary` 还是别的，不保存内容。每行最多读 8 个文件。
+- 名字含关键词的目录单独列一行，以 `directory` 结尾。超过深度上限、没有打开的目录也列出来。
+- 脱敏按路径的每一段执行。先整段判断，再把段里的字母数字串按大小写和数字边界拆成词（`QQLyricCache` 拆成 `QQ`、`Lyric`、`Cache`）逐个判断：
 
 | 内容 | 替换成 |
 |---|---|
-| 纯数字 | `<num>` |
+| 纯数字的串；词里夹着的 5 位以上数字 | `<num>` |
 | 8 位以上且含数字的十六进制串，或 16 位以上的十六进制串 | `<hex>` |
 | UUID | `<uuid>` |
 | 20 位以上且含 4 个以上数字的字母数字串 | `<id>` |
-| 含非 ASCII 字符的段，带空格的文件名 | `<text>` |
+| 含 `@`（邮箱形式的账号）或非 ASCII 字符的段，带空格的文件名 | `<text>` |
 | 超过 64 个字符的段 | `<long>` |
-| 英文词里夹着的 5 位以上数字 | 只把数字换成 `<num>` |
-| 同一目录、同一扩展名下超过 4 个不同的英文文件名 | 合并成 `<name>` |
+| 目录名里不在词表中的词，相邻的合成一个 | `<word>` |
+| 文件主名里两个字母以上的词，除非主名含关键词 | `<word>` |
 
-  其余英文目录名和文件名原样保留，例如 `Application Support`、`com.tencent.QQMusic`、`LyricCache`。
-- 上限：目录深 10 层（`Documents` 算第 1 层）、6 万个目录项、240 行、读 600 次文件头、6 秒。触到哪个上限，`limited=` 里就写哪个，同时 `complete=0`。
+- 目录名里保留的词：含关键词的词、技术词表里的词（`Documents`、`Caches`、`Application`、`Support`、`download`、`cache`、`song`、`tencent`、`netease`、`cloudmusic` 等，见 `sources/IKLyricEvidence.m` 的 `IKVocabulary`）、两个字母以内的词、四个字母以内的大写缩写（`QQ`、`MMKV`、`HTTP`）。所以 `Application Support`、`com.tencent.QQMusic`、`LyricCache` 原样保留，`johnsmith` 变成 `<word>`，`QQJohnCache` 变成 `QQ<word>Cache`。
+- 文件主名更严：只有含关键词时才保留词表里的词，例如 `lyric_cache.db`、`QQLyricCache_v2.plist`。`Hello.lrc`、`index.json` 分别是 `<word>.lrc`、`<word>.json`，哪怕目录里只有这一个文件。扩展名保留词表里的词和四个字母以内的词，`Mr.Brightside` 的扩展名也是 `<word>`。
+- 代价是：播放器写死、但不在词表里的英文目录名也会显示成 `<word>`。真机报告里关键目录显示成 `<word>` 时，把它的位置告诉我们，再决定是否把这个词加进词表。
+- 上限：目录深 10 层（`Documents` 算第 1 层）、6 万个目录项、240 行、读 600 次文件头、6 秒。触到哪个上限，`limited=` 里就写哪个。`complete=1` 只表示所有目录都读完、所有匹配的文件都列出、文件头额度也没用完，触到任何一个上限都是 `complete=0`。
 - 名字含关键词的目录和它下面的目录优先读，避免一个无关的大缓存先把上限用完。
-- 不跟随符号链接，跳过 `Library/IslandKit`。
+- 不跟随符号链接。目录从容器根起一层一层打开，每一层都拒绝符号链接，所以扫描途中有目录被换成链接，也不会读到容器外面。文件头、文件类型和大小在同一个文件描述符上读取，打开时同样拒绝链接，也不会被换进来的管道文件卡住。跳过 `Library/IslandKit`。
 
 ### 导出的文本
 
@@ -129,7 +133,7 @@ lyric events app=com.tencent.QQMusic side=player captured=… kept=… total=…
   t=81234.512 pos=63.20 rate=1.00 dur=215.0 changed=artist len=12
 lyric events app=com.tencent.QQMusic side=hud captured=… kept=… total=…
   t=81234.530 pos=63.20 rate=1.00 dur=215.0 changed=artist len=12
-lyric latency app=com.tencent.QQMusic paired=57 player=60 hud=58 min=… median=… p90=… max=… (seconds, HUD seen minus player set)
+lyric latency app=com.tencent.QQMusic paired=55 ambiguous=2 unmatched=1 player=60 hud=58 match=state+position min=… median=… p90=… max=… (seconds, HUD seen minus player set)
 container scan app=com.tencent.QQMusic directories=… entries=… matched=… rows=… unlisted=… symlinks=… unreadable=… tooDeep=… complete=1 limited=none seconds=…
   Library/…/Lyric/ directory
   Library/…/Lyric/<num>.qrc ext=qrc files=132 bytes=1204..8830 header=binary sampled=8
@@ -137,11 +141,12 @@ container scan app=com.tencent.QQMusic directories=… entries=… matched=… r
 
 - 成员行的前缀：`-` 实例方法，`+` 类方法，`@` 属性，`.` 成员变量。
 - `t` 是系统运行时间（秒），`pos` 是当时播放信息里的进度，`len` 是变化后的文字长度。`first` 是这次运行记下的第一条，`newDuration` 表示时长也变了，一般是换歌。
-- `lyric latency` 把悬浮端看到的每次变化，和它之前 10 秒内播放器设置的第一条还没配过、且有同一字段长度相同的变化配成一对，给出时间差的最小值、中位数、九成位和最大值。
-- 中位数只有几十毫秒而岛上仍慢一句，说明是播放器发得晚。这时拿 player 一侧的 `pos` 和这句在歌词文件里的起始时间比。中位数接近一句的长度，说明是系统传得晚。
-- `paired=0` 时看 `reason`：`no-player-events` 是探针没运行或没放歌，`no-hud-events` 是悬浮窗没开，`different-boot` 是两份记录不属于同一次开机，`no-overlap` 是两边没有对得上的变化。
-- 连续几句长度相同、悬浮端又漏掉一次时，个别配对会偏大。以逐条记录为准。
-- 没有探针结果时写 `classes=absent` 和 `side=player absent`。读回来的文件按不可信输入处理，不符合符号形状的条目丢弃并计入 `invalid`。
+- `lyric latency` 只衡量系统把播放器设置的信息送到悬浮端花了多久。配对看变化之后的整个状态：标题、歌手、专辑三个长度和时长都相同；两边都记了进度时，进度也要相同（差 10 毫秒以内，两边读的是同一份播放字典）。悬浮端的每次变化，只和它之前 10 秒内、上一对之后、状态相同的那一条播放器记录配对。
+- 符合条件的播放器记录不止一条时无法区分，不配对，计入 `ambiguous`，不会去猜。例如两句等长、悬浮端漏掉了前一句：有进度时靠进度区分，没有进度时就算歧义，不会把 30 毫秒报成 4 秒。找不到对应记录的计入 `unmatched`。
+- 带进度一对也配不上时，会不看进度再配一次，并标 `match=state`，用来应对系统改写进度的情况。等长歧义照样不配。
+- 这个延迟回答不了“播放器是不是发得晚”。延迟只有几十毫秒，说明系统传递不是慢一句的原因；播放器是否晚发，要拿 player 一侧每条记录的 `pos` 和这句在同一录音歌词文件里的开始时间比，这一步需要歌词文件，这份报告给不出结论。延迟达到秒级时，系统或悬浮端是瓶颈之一。
+- `paired=0` 时看 `reason`：`no-player-events` 是探针没运行或没放歌，`no-hud-events` 是悬浮窗没开，`different-boot` 是两份记录不属于同一次开机，`ambiguous` 是对得上的变化都有歧义，`no-overlap` 是两边没有对得上的变化。
+- 没有探针结果时写 `classes=absent` 和 `side=player absent`。读回来的文件按不可信输入处理：类名、方法名只能是符号字符；类型编码不能有空格和非 ASCII；镜像路径必须是相对路径、不超过 8 段，每一段再脱敏一次结果不变（含空格、非 ASCII 或 `@` 的都不行）。不符合的条目丢弃并计入 `invalid`。
 
 ### 这一版没有做的
 

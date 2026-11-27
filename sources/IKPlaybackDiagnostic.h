@@ -9,6 +9,9 @@
 BOOL IKMetadataSymbol(id key);
 BOOL IKLyricSymbol(NSString *key);
 NSDictionary *IKLyricFileShape(NSURL *url);
+// The same for `name` inside the open directory `directory` (AT_FDCWD for a path). The file is opened without
+// following a symbolic link, and its type, size and first 512 bytes all come from that one descriptor.
+NSDictionary *IKLyricShapeAt(int directory, const char *name, NSString *extension);
 NSString *IKFileShapeSummary(NSDictionary *shape);
 void IKRememberDiagnostic(NSURL *directory, NSDictionary *packet);
 NSString *IKDiagnosticHistory(NSURL *directory, NSString *bundle);

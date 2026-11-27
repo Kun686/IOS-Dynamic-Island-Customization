@@ -89,7 +89,7 @@ static NSString *IKAdjacentFile(NSString *playerPath, NSString *name) {
 @property(nonatomic, strong) NSTimer *boundary;
 @property(nonatomic) NSUInteger generation;
 @property(nonatomic, strong) NSMutableDictionary<NSString *, IKLyricEventLog *> *eventLogs;
-@property(nonatomic) double refreshedAt;
+@property(nonatomic) NSUInteger notedGeneration;
 @end
 
 static void IKLyricsBridgeChanged(CFNotificationCenterRef center, void *observer, CFStringRef name,
@@ -347,8 +347,8 @@ static NSDictionary *IKSnapshot(NSString *path) {
 
 // When the system delivered a changed title, artist or album from a supported player. The probe inside the player
 // records when the player set it. Only times, positions and text lengths are kept.
-- (void)noteDisplayFields:(NSDictionary *)info {
-    NSString *bid = self.mediaApplicationID;
+// `bid` is the app the same refresh round reported, `seen` the uptime at which that round's dictionary arrived.
+- (void)noteDisplayFields:(NSDictionary *)info app:(NSString *)bid seenAt:(double)seen {
     if (!IKSupportedPlayer(bid)) return;
     if (!self.eventLogs) self.eventLogs = [NSMutableDictionary dictionary];
     IKLyricEventLog *log = self.eventLogs[bid.lowercaseString];
@@ -357,7 +357,6 @@ static NSDictionary *IKSnapshot(NSString *path) {
         id value = info[(__bridge NSString *)key];
         return [value isKindOfClass:NSNumber.class] ? value : nil;
     };
-    double seen = self.refreshedAt > 0 ? self.refreshedAt : NSProcessInfo.processInfo.systemUptime;
     if ([log observeTitle:info[(__bridge NSString *)kMRMediaRemoteNowPlayingInfoTitle]
                    artist:info[(__bridge NSString *)kMRMediaRemoteNowPlayingInfoArtist]
                     album:info[(__bridge NSString *)kMRMediaRemoteNowPlayingInfoAlbum]
@@ -367,7 +366,6 @@ static NSDictionary *IKSnapshot(NSString *path) {
 }
 
 - (void)applyInfo:(NSDictionary *)info playing:(BOOL)playing {
-    [self noteDisplayFields:info];
     NSDictionary *raw = IKSystemTrack(info);
     if (!raw && info.count && self.tracker.recording) raw = @{};
     self.rawTrack = raw;
@@ -434,11 +432,27 @@ static NSDictionary *IKSnapshot(NSString *path) {
 
 - (void)refresh {
     NSUInteger gen = ++self.generation;
-    self.refreshedAt = NSProcessInfo.processInfo.systemUptime;
     dispatch_queue_t main = dispatch_get_main_queue();
     __block NSDictionary *info;
     __block NSNumber *playing;
+    // Timing evidence for the probe report. Credit the dictionary once, to the app reported in the same round,
+    // and use the moment the dictionary arrived. A round that a newer refresh superseded still counts when it
+    // completes before that newer one; an older round finishing late is dropped so it cannot replay an old state.
+    __block NSDictionary *seenInfo;
+    __block NSString *roundApp;
+    __block BOOL appKnown = NO, noted = NO;
+    __block double seenAt = 0;
+    void (^note)(void) = ^{
+        if (noted || !appKnown || !seenInfo) return;
+        noted = YES;
+        if (gen <= self.notedGeneration) return;
+        self.notedGeneration = gen;
+        [self noteDisplayFields:seenInfo app:roundApp seenAt:seenAt];
+    };
     MRMediaRemoteGetNowPlayingApplicationDisplayID(main, ^(NSString *bid) {
+        roundApp = [bid isKindOfClass:NSString.class] ? bid : nil;
+        appKnown = YES;
+        note();
         if (gen != self.generation) return;
         BOOL switched = self.mediaApplicationID && ![self.mediaApplicationID isEqual:bid];
         if (switched) [self clearPlayerScope];
@@ -453,8 +467,13 @@ static NSDictionary *IKSnapshot(NSString *path) {
         if (info) [self applyInfo:info playing:value];
     });
     MRMediaRemoteGetNowPlayingInfo(main, ^(CFDictionaryRef result) {
+        double arrived = NSProcessInfo.processInfo.systemUptime;
+        NSDictionary *copy = [(__bridge NSDictionary *)result copy] ?: @{};
+        seenInfo = copy;
+        seenAt = arrived;
+        note();
         if (gen != self.generation) return;
-        info = [(__bridge NSDictionary *)result copy] ?: @{};
+        info = copy;
         id rate = info[(__bridge NSString *)kMRMediaRemoteNowPlayingInfoPlaybackRate];
         [self applyInfo:info playing:playing ? playing.boolValue : (rate ? [rate doubleValue]>0 : self.isPlaying)];
     });

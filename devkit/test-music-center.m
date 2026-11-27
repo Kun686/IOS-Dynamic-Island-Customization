@@ -6,8 +6,9 @@
 
 static NSString *store, *bundle;
 static NSDictionary *metadata;
-static BOOL playing, delayBundle;
+static BOOL playing, delayBundle, delayInfo;
 static void (^bundleReply)(NSString *);
+static void (^infoReply)(CFDictionaryRef);
 static NSMutableArray<NSString *> *messages;
 
 @implementation UIImage
@@ -41,7 +42,10 @@ NSString *kMRMediaRemoteNowPlayingInfoDidChangeNotification = @"info";
 NSString *kMRMediaRemoteNowPlayingApplicationIsPlayingDidChangeNotification = @"playing";
 NSString *kMRMediaRemoteNowPlayingApplicationDidChangeNotification = @"application";
 void MRMediaRemoteRegisterForNowPlayingNotifications(dispatch_queue_t q) {}
-void MRMediaRemoteGetNowPlayingInfo(dispatch_queue_t q, void (^reply)(CFDictionaryRef)) { reply((__bridge CFDictionaryRef)metadata); }
+void MRMediaRemoteGetNowPlayingInfo(dispatch_queue_t q, void (^reply)(CFDictionaryRef)) {
+    if (delayInfo) infoReply = reply;
+    else reply((__bridge CFDictionaryRef)metadata);
+}
 void MRMediaRemoteGetNowPlayingApplicationIsPlaying(dispatch_queue_t q, void (^reply)(Boolean)) { reply(playing); }
 void MRMediaRemoteGetNowPlayingApplicationDisplayID(dispatch_queue_t q, void (^reply)(NSString *)) {
     if (delayBundle) bundleReply = reply;
@@ -159,12 +163,47 @@ static void testEvidenceExport(IKMusicCenter *center) {
           [report containsString:@"lyric events app=com.netease.cloudmusic side=hud captured="] &&
           [report containsString:@"pos=10.00 rate=1.00 dur=240.0 changed=artist len=7\n"] &&
           [report containsString:@"lyric events app=com.tencent.QQMusic side=player absent"], "export lists field changes from both sides");
-    check([report containsString:@"lyric latency app=com.netease.cloudmusic paired=3 player=4 hud="] && [report containsString:@" min=0.03"],
-          "export measures the delay between the player and the HUD");
+    check([report containsString:@"lyric latency app=com.netease.cloudmusic paired=4 ambiguous=0 unmatched="] &&
+          [report containsString:@"match=state+position min=0.03"], "export measures the delay between the player and the HUD");
     check([report containsString:@"container scan app=com.netease.cloudmusic directories="] &&
           [report containsString:@"\n  Documents/Lyric/<num>.yrc ext=yrc files=1 bytes="] && [report containsString:@"header=timed-text sampled=1"],
           "export includes the container's lyric file shapes");
     check(![report containsString:@"证据"] && ![report containsString:@"20231234"] && ![report containsString:store], "export holds no text, IDs or paths");
+}
+
+static NSArray<NSArray<NSNumber *> *> *hudEvents(NSString *bid) {
+    NSString *name = [NSString stringWithFormat:@"lyric-hud-events-%@.plist", bid.lowercaseString];
+    return [NSDictionary dictionaryWithContentsOfFile:[store stringByAppendingPathComponent:name]][@"events"] ?: @[];
+}
+
+// #117: the system switched to another player and this round's dictionary arrives before its app ID.
+static void testRoundAttribution(IKMusicCenter *center) {
+    [center clearPlayerScope];
+    bundle = @"com.tencent.QQMusic";
+    playing = YES;
+    metadata = @{@"Title":@"归属歌名", @"Artist":@"归属歌手", @"Duration":@233, @"ElapsedTime":@3, @"QueueIndex":@30};
+    [center refresh];
+    NSUInteger qq = hudEvents(@"com.tencent.QQMusic").count, netease = hudEvents(@"com.netease.cloudmusic").count;
+    check(qq > 0 && [center.title isEqual:@"归属歌名"], "QQ Music is the current player");
+    bundle = @"com.netease.cloudmusic";
+    metadata = @{@"Title":@"另一首", @"Artist":@"另一个歌手名", @"Duration":@251, @"ElapsedTime":@7, @"QueueIndex":@31};
+    delayBundle = YES;
+    delayInfo = YES;
+    [center refresh];
+    usleep(50000);
+    double arrived = NSProcessInfo.processInfo.systemUptime;
+    delayInfo = NO;
+    infoReply((__bridge CFDictionaryRef)metadata);
+    check(hudEvents(@"com.tencent.QQMusic").count == qq, "the dictionary is not credited to the previous player while the app ID is pending");
+    usleep(50000);
+    delayBundle = NO;
+    bundleReply(bundle);
+    NSArray<NSArray<NSNumber *> *> *after = hudEvents(@"com.netease.cloudmusic");
+    check(hudEvents(@"com.tencent.QQMusic").count == qq && after.count == netease + 1 &&
+          after.lastObject[6].unsignedIntegerValue == 6 && after.lastObject[1].doubleValue == 7, "credited once, to the app of the same round");
+    double seen = after.lastObject[0].doubleValue;
+    check(seen >= arrived && seen < arrived + 0.04, "timed when the dictionary arrived, not when it was requested or attributed");
+    check([center.title isEqual:@"另一首"], "the HUD itself still switches players");
 }
 
 int main(int argc, const char **argv) { @autoreleasepool {
@@ -295,6 +334,7 @@ int main(int argc, const char **argv) { @autoreleasepool {
     testPublishedHandoff(m,@(argv[1]),@"com.netease.cloudmusic",@"netease");
     testSampleFolder();
     testEvidenceExport(m);
+    testRoundAttribution(m);
     if (![NSFileManager.defaultManager removeItemAtPath:store error:nil]) return 2;
     printf("HUD and settings: %d checks passed\n",count);
     return 0;

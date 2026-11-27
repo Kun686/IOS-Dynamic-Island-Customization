@@ -19,7 +19,7 @@ NSString *IKProbeAppImage(NSString *image, NSString *bundlePath) {
     if ([path.lastPathComponent.lowercaseString hasPrefix:@"islandkit"]) return nil;
     NSMutableArray<NSString *> *shown = [NSMutableArray array];
     for (NSString *part in [[path substringFromIndex:base.length + 1] componentsSeparatedByString:@"/"])
-        if (part.length && shown.count < 8) [shown addObject:IKRedactPathSegment(part)];
+        if (part.length && shown.count < 8) [shown addObject:IKRedactImageSegment(part)];
     return shown.count ? [shown componentsJoinedByString:@"/"] : nil;
 }
 
@@ -136,21 +136,58 @@ NSDictionary *IKProbeCollectClasses(NSArray<NSArray<NSString *> *> *images, IKPr
 
 #pragma mark - Sampling guard
 
-BOOL IKProbeBeginSampling(NSURL *directory, NSString *version, NSUInteger *attempts) {
-    if (attempts) *attempts = 0;
-    if (!directory.isFileURL) return NO;
-    NSURL *file = [directory URLByAppendingPathComponent:IKProbeGuardName];
+// The guard file holds {version, attempts: {trigger: unfinished count}} for the current player version.
+static NSMutableDictionary<NSString *, NSNumber *> *IKProbeGuardCounts(NSURL *file, NSString *version) {
     NSDictionary *old = IKReadEvidence(file);
-    NSUInteger tried = [old[@"version"] isEqual:version ?: @"?"] && [old[@"attempts"] isKindOfClass:NSNumber.class]
-        ? [old[@"attempts"] unsignedIntegerValue] : 0;
+    NSMutableDictionary<NSString *, NSNumber *> *counts = [NSMutableDictionary dictionary];
+    NSDictionary *attempts = old[@"attempts"];
+    if (![old[@"version"] isEqual:version] || ![attempts isKindOfClass:NSDictionary.class]) return counts;
+    for (NSString *trigger in @[@"launch", @"playback"]) {
+        id value = attempts[trigger];
+        if ([value isKindOfClass:NSNumber.class] && [value unsignedIntegerValue] > 0) counts[trigger] = @(MIN([value unsignedIntegerValue], 99));
+    }
+    return counts;
+}
+
+static BOOL IKProbeWriteGuard(NSURL *file, NSString *version, NSDictionary *counts) {
+    if (!counts.count) return [NSFileManager.defaultManager removeItemAtURL:file error:nil] || ![NSFileManager.defaultManager fileExistsAtPath:file.path];
+    return [@{@"version": version, @"attempts": counts} writeToURL:file atomically:YES];
+}
+
+BOOL IKProbeBeginSampling(NSURL *directory, NSString *version, NSString *trigger, NSUInteger *attempts) {
+    if (attempts) *attempts = 0;
+    if (!directory.isFileURL || ![@[@"launch", @"playback"] containsObject:trigger ?: @""]) return NO;
+    version = version ?: @"?";
+    NSURL *file = [directory URLByAppendingPathComponent:IKProbeGuardName];
+    NSMutableDictionary<NSString *, NSNumber *> *counts = IKProbeGuardCounts(file, version);
+    NSUInteger tried = counts[trigger].unsignedIntegerValue;
     if (attempts) *attempts = tried;
     if (tried >= 2) return NO;
     if (![NSFileManager.defaultManager createDirectoryAtURL:directory withIntermediateDirectories:YES attributes:nil error:nil]) return NO;
-    return [@{@"version": version ?: @"?", @"attempts": @(tried + 1)} writeToURL:file atomically:YES];
+    counts[trigger] = @(tried + 1);
+    return IKProbeWriteGuard(file, version, counts);
 }
 
-void IKProbeEndSampling(NSURL *directory) {
-    [NSFileManager.defaultManager removeItemAtURL:[directory URLByAppendingPathComponent:IKProbeGuardName] error:nil];
+void IKProbeEndSampling(NSURL *directory, NSString *trigger) {
+    if (!directory.isFileURL || !trigger) return;
+    NSURL *file = [directory URLByAppendingPathComponent:IKProbeGuardName];
+    NSDictionary *old = IKReadEvidence(file);
+    NSString *version = [old[@"version"] isKindOfClass:NSString.class] ? old[@"version"] : @"?";
+    NSMutableDictionary *counts = IKProbeGuardCounts(file, version);
+    [counts removeObjectForKey:trigger];
+    IKProbeWriteGuard(file, version, counts);
+}
+
+BOOL IKProbePlaybackStarted(NSDictionary *previous, NSDictionary *current) {
+    if (![current[@"title"] isKindOfClass:NSString.class] || ![current[@"title"] length]) return NO;
+    id rate = current[@"rate"];
+    if ([rate isKindOfClass:NSNumber.class]) return [rate doubleValue] > 0 && isfinite([rate doubleValue]);
+    if (![previous[@"title"] isEqual:current[@"title"]]) return NO;
+    id before = previous[@"elapsed"], after = current[@"elapsed"];
+    if (![before isKindOfClass:NSNumber.class] || ![after isKindOfClass:NSNumber.class]) return NO;
+    double moved = [after doubleValue] - [before doubleValue];
+    double passed = [current[@"uptime"] doubleValue] - [previous[@"uptime"] doubleValue];
+    return isfinite(moved) && isfinite(passed) && passed > 0 && moved >= 0.25 && moved <= passed * 2 + 1;
 }
 
 #pragma mark - Now-playing hook
@@ -189,6 +226,7 @@ static NSURL *IKProbeDirectory;
 static NSString *IKProbeBundle, *IKProbeBundlePath, *IKProbeOwnImage;
 static NSSet<NSString *> *IKProbeFirstNames;
 static NSMutableArray<NSDictionary *> *IKProbeSamples;
+static NSDictionary *IKProbeLastCall;  // title, rate, elapsed, uptime of the previous call; in memory only
 static BOOL IKProbeFlushPending, IKProbePlaybackSeen;
 static double IKProbePlaybackDelay, IKProbeFlushDelay;
 
@@ -197,7 +235,7 @@ static void IKProbeSample(NSString *trigger) {
     @autoreleasepool {
         @try {
             NSString *version = IKPlayerVersion(NSBundle.mainBundle.infoDictionary[@"CFBundleShortVersionString"]);
-            if (!IKProbeBeginSampling(IKProbeDirectory, version, NULL)) return;
+            if (!IKProbeBeginSampling(IKProbeDirectory, version, trigger, NULL)) return;
             double started = NSProcessInfo.processInfo.systemUptime;
             NSArray *images = IKProbeAppImages(IKProbeBundlePath, IKProbeOwnImage);
             NSMutableDictionary *packet = [IKProbeCollectClasses(images, IKProbeDefaultLimits(), IKProbeFirstNames) mutableCopy];
@@ -215,7 +253,7 @@ static void IKProbeSample(NSString *trigger) {
             NSData *data = [NSPropertyListSerialization dataWithPropertyList:packet format:NSPropertyListBinaryFormat_v1_0 options:0 error:nil];
             if (data.length && data.length <= IKEvidenceMaxFileBytes)
                 [data writeToURL:[IKProbeDirectory URLByAppendingPathComponent:IKProbeClassesName] options:NSDataWritingAtomic error:nil];
-            IKProbeEndSampling(IKProbeDirectory);
+            IKProbeEndSampling(IKProbeDirectory, trigger);
         } @catch (__unused id exception) {
         }
     }
@@ -241,7 +279,13 @@ static void IKProbeObserve(NSDictionary *info, double uptime) {
                 [IKProbeLog writeTo:[IKProbeDirectory URLByAppendingPathComponent:IKProbeEventsName]];
             });
         }
-        BOOL playing = title.length && (rate ? [rate doubleValue] > 0 : YES);
+        NSMutableDictionary *call = [NSMutableDictionary dictionaryWithObject:@(uptime) forKey:@"uptime"];
+        if (title) call[@"title"] = title;
+        if (rate) call[@"rate"] = rate;
+        if (elapsed) call[@"elapsed"] = elapsed;
+        BOOL playing = IKProbePlaybackStarted(IKProbeLastCall, call);
+        IKProbeLastCall = call;
+        // A player may publish the next track's title while paused. Only a confirmed start uses up the playback sample.
         if (playing && !IKProbePlaybackSeen) {
             IKProbePlaybackSeen = YES;
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(IKProbePlaybackDelay * NSEC_PER_SEC)), IKProbeQueue, ^{

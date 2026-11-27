@@ -22,11 +22,18 @@ BOOL IKEvidenceKeyword(NSString *name);
 // -1 no keyword, 0 likely data or logic, 1 view-like (View, Cell, Button, Label, Layer). Lower ranks are listed first.
 NSInteger IKEvidenceClassRank(NSString *name);
 
-// Path segment with account-like parts replaced: digits <num>, long hex <hex>, UUID <uuid>,
-// long mixed tokens <id>, anything outside printable ASCII <text>. Fixed English names pass through.
+// A directory name from a player's data container. Digits become <num>, long hex <hex>, a UUID <uuid>,
+// long mixed tokens <id>; a name with '@' or anything outside printable ASCII becomes <text>.
+// Words are kept only when they carry a lyric keyword, are in a vocabulary of technical words,
+// have at most two letters, or are a capitalised acronym of at most four; other words become <word>.
+// Placeholders already present pass through, so redacting twice gives the same result.
 NSString *IKRedactPathSegment(NSString *segment);
-// The same for a file name. The extension is returned lowercased, or @"" when there is none.
+// A file name. The stem keeps words only when it contains a lyric keyword ("lyric_cache"), otherwise
+// every word of two letters or more becomes <word>; a stem with spaces is <text>. The extension keeps
+// short and technical names and is returned lowercased in `extension`, or @"" when there is none.
 NSString *IKRedactFileName(NSString *name, NSString **extension);
+// A path segment inside the app bundle (framework and executable names). Only numbers and IDs are replaced.
+NSString *IKRedactImageSegment(NSString *segment);
 
 typedef struct {
     NSUInteger classes;  // classes listed with members

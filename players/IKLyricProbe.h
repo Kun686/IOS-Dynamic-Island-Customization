@@ -20,9 +20,15 @@ NSDictionary *IKProbeCollectClasses(NSArray<NSArray<NSString *> *> *images, IKPr
 // with the dictionary and the system uptime taken before the original ran. Installs once per process.
 BOOL IKProbeHookNowPlaying(Class center, void (^observer)(NSDictionary *info, double uptime));
 
-// At most two unfinished attempts per player version. Returns NO when class sampling should be skipped.
-BOOL IKProbeBeginSampling(NSURL *directory, NSString *version, NSUInteger *attempts);
-void IKProbeEndSampling(NSURL *directory);
+// At most two unfinished attempts per player version and per trigger ("launch" or "playback").
+// Returns NO when this trigger's class sampling should be skipped. Finishing one trigger leaves the other's count alone.
+BOOL IKProbeBeginSampling(NSURL *directory, NSString *version, NSString *trigger, NSUInteger *attempts);
+void IKProbeEndSampling(NSURL *directory, NSString *trigger);
+
+// `previous` and `current` describe two consecutive -setNowPlayingInfo: calls with the keys title, rate, elapsed
+// and uptime (each optional). Playback has started when the player publishes a positive rate, or, without a rate,
+// when the same title's position advances with the clock. A title alone, a zero rate or a jump does not count.
+BOOL IKProbePlaybackStarted(NSDictionary *previous, NSDictionary *current);
 
 // Starts the probe in this process: hooks the now-playing setter, samples classes `launchDelay` seconds from now and
 // `playbackDelay` seconds after playback is first published, and saves field-change events at most every `flushDelay` seconds.

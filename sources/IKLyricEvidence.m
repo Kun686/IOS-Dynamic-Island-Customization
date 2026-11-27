@@ -27,8 +27,58 @@ NSInteger IKEvidenceClassRank(NSString *name) {
 #pragma mark - Redaction
 
 static BOOL IKDigit(unichar c) { return c >= '0' && c <= '9'; }
+static BOOL IKUpper(unichar c) { return c >= 'A' && c <= 'Z'; }
+static BOOL IKLower(unichar c) { return c >= 'a' && c <= 'z'; }
 static BOOL IKHex(unichar c) { return IKDigit(c) || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'); }
-static BOOL IKAlnum(unichar c) { return IKDigit(c) || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'); }
+static BOOL IKAlnum(unichar c) { return IKDigit(c) || IKUpper(c) || IKLower(c); }
+
+typedef NS_ENUM(NSInteger, IKRedactMode) {
+    IKRedactDirectory,  // words outside the vocabulary become <word>
+    IKRedactStem,       // file names: words survive only next to a lyric keyword
+    IKRedactExtension,  // short format names survive
+    IKRedactImage,      // paths inside the app bundle carry no user data: only numbers and IDs are replaced
+};
+
+// Words that occur in fixed directory and file names of iOS apps. Lowercase.
+static NSSet<NSString *> *IKVocabulary(void) {
+    static NSSet *words;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        words = [NSSet setWithArray:[@"documents library caches cache cached tmp temp temporary preferences preference application applications "
+            "app apps support saved state splash board snapshot snapshots http https storage storages store stores web webkit kit cookie cookies "
+            "fs data database databases db sqlite sqlite3 realm mmkv kv plist json xml txt bin dat raw file files folder dir dirs directory inbox "
+            "synced sync download downloads downloaded downloading upload uploads offline online local remote cloud song songs audio audios media "
+            "track tracks album albums artist artists playlist playlists play player playing playback queue lyric lyrics trans translate translation "
+            "translated roma romaji image images img imgs pic pics picture pictures photo photos cover covers thumb thumbs thumbnail thumbnails video "
+            "videos mv log logs crash crashes report reports config configs configuration setting settings user users account accounts profile "
+            "profiles common shared share global default main index manifest meta metadata info list lists version versions backup backups value "
+            "values resource resources res asset assets bundle bundles plugin plugins module modules html js css font fonts sound sounds effect "
+            "effects voice radio podcast program programs comment comments search history recent favorite favorites like likes collect collection "
+            "collections task tasks job jobs encrypt encrypted decrypt decrypted key keys cert certs framework frameworks lib libs core sdk api "
+            "network request response session sessions url urls analytics stat stats statistics event events trace tracking ad ads launch boot new "
+            "old test debug release vip quality lossless flac mp3 m4a aac ogg wav ape opus pcm mp4 hls m3u8 seg segment segments chunk chunks part "
+            "parts piece pieces block blocks item items entry entries table tables dict array object objects model models manager center service "
+            "services provider helper util utils tool tools parser decoder encoder loader reader writer handler view views controller page pages "
+            "widget widgets extension extensions group groups container containers private public internal external system device devices code "
+            "wal shm journal tencent qqmusic tme netease cloudmusic music apple com"
+            componentsSeparatedByString:@" "]];
+    });
+    return words;
+}
+
+static NSString *const IKPlaceholders[] = {@"<num>", @"<hex>", @"<uuid>", @"<id>", @"<word>", @"<text>", @"<long>", @"<empty>"};
+
+// A placeholder starting at `i`, so redacting a redacted name changes nothing.
+static NSString *IKPlaceholderAt(const unichar *s, NSUInteger n, NSUInteger i) {
+    for (NSUInteger k = 0; k < sizeof(IKPlaceholders) / sizeof(IKPlaceholders[0]); k++) {
+        NSString *mark = IKPlaceholders[k];
+        if (i + mark.length > n) continue;
+        BOOL same = YES;
+        for (NSUInteger m = 0; same && m < mark.length; m++) same = s[i + m] == [mark characterAtIndex:m];
+        if (same) return mark;
+    }
+    return nil;
+}
 
 // 8-4-4-4-12 hex digits starting at `i`, not followed by another letter or digit.
 static BOOL IKUUIDAt(const unichar *s, NSUInteger n, NSUInteger i) {
@@ -40,17 +90,60 @@ static BOOL IKUUIDAt(const unichar *s, NSUInteger n, NSUInteger i) {
     return YES;
 }
 
-NSString *IKRedactPathSegment(NSString *segment) {
+static BOOL IKKeepWord(NSString *word, IKRedactMode mode, BOOL keywordStem) {
+    if (mode == IKRedactImage || IKEvidenceKeyword(word)) return YES;
+    BOOL known = [IKVocabulary() containsObject:word.lowercaseString];
+    BOOL acronym = word.length <= 4 && IKUpper([word characterAtIndex:0]) && IKUpper([word characterAtIndex:word.length - 1]);
+    switch (mode) {
+        case IKRedactDirectory: return known || word.length <= 2 || acronym;
+        case IKRedactStem: return word.length == 1 || (keywordStem && (known || word.length <= 2));
+        case IKRedactExtension: return known || word.length <= 4;
+        default: return YES;
+    }
+}
+
+// One run of letters and digits, split into words: "QQLyricCache2x" is QQ, Lyric, Cache, 2, x.
+static void IKAppendRun(NSMutableString *out, const unichar *s, NSUInteger i, NSUInteger end, IKRedactMode mode, BOOL keywordStem) {
+    BOOL masked = NO;
+    while (i < end) {
+        NSUInteger j = i + 1;
+        if (IKDigit(s[i])) {
+            while (j < end && IKDigit(s[j])) j++;
+        } else if (IKUpper(s[i]) && j < end && IKUpper(s[j])) {
+            while (j < end && IKUpper(s[j])) j++;
+            if (j < end && IKLower(s[j])) j--;  // the last capital starts the next word
+        } else {
+            while (j < end && IKLower(s[j])) j++;
+        }
+        NSString *word = [NSString stringWithCharacters:s + i length:j - i];
+        if (IKDigit(s[i])) {
+            [out appendString:word.length >= 5 ? @"<num>" : word];
+            masked = NO;
+        } else if (IKKeepWord(word, mode, keywordStem)) {
+            [out appendString:word];
+            masked = NO;
+        } else if (!masked) {
+            [out appendString:@"<word>"];
+            masked = YES;
+        }
+        i = j;
+    }
+}
+
+static NSString *IKRedact(NSString *segment, IKRedactMode mode) {
     if (![segment isKindOfClass:NSString.class] || !segment.length) return @"<empty>";
     NSUInteger n = segment.length;
     if (n > 64) return @"<long>";
     unichar s[64];
     [segment getCharacters:s range:NSMakeRange(0, n)];
     for (NSUInteger i = 0; i < n; i++)
-        if (s[i] < 0x20 || s[i] > 0x7e) return @"<text>";
+        if (s[i] < 0x20 || s[i] > 0x7e || s[i] == '@' || (s[i] == ' ' && mode != IKRedactDirectory)) return @"<text>";
+    BOOL keywordStem = mode == IKRedactStem && IKEvidenceKeyword(segment);
     NSMutableString *out = [NSMutableString string];
     NSUInteger i = 0;
     while (i < n) {
+        NSString *mark = s[i] == '<' ? IKPlaceholderAt(s, n, i) : nil;
+        if (mark) { [out appendString:mark]; i += mark.length; continue; }
         if (!IKAlnum(s[i])) { [out appendFormat:@"%C", s[i++]]; continue; }
         if (IKUUIDAt(s, n, i)) { [out appendString:@"<uuid>"]; i += 36; continue; }
         NSUInteger j = i, digits = 0;
@@ -63,21 +156,14 @@ NSString *IKRedactPathSegment(NSString *segment) {
         if (digits == length) [out appendString:@"<num>"];
         else if (hex && length >= 8 && (digits || length >= 16)) [out appendString:@"<hex>"];
         else if (length >= 20 && digits >= 4) [out appendString:@"<id>"];
-        else {
-            // Keep the words. A run of five or more digits inside them may be an account or track number.
-            for (NSUInteger k = i; k < j;) {
-                NSUInteger run = k;
-                while (run < j && IKDigit(s[run])) run++;
-                if (run - k >= 5) { [out appendString:@"<num>"]; k = run; continue; }
-                if (run == k) run++;
-                [out appendString:[NSString stringWithCharacters:s + k length:run - k]];
-                k = run;
-            }
-        }
+        else IKAppendRun(out, s, i, j, mode, keywordStem);
         i = j;
     }
     return out;
 }
+
+NSString *IKRedactPathSegment(NSString *segment) { return IKRedact(segment, IKRedactDirectory); }
+NSString *IKRedactImageSegment(NSString *segment) { return IKRedact(segment, IKRedactImage); }
 
 NSString *IKRedactFileName(NSString *name, NSString **extension) {
     if (extension) *extension = @"";
@@ -89,14 +175,23 @@ NSString *IKRedactFileName(NSString *name, NSString **extension) {
         NSCharacterSet *allowed = [NSCharacterSet characterSetWithCharactersInString:
             @"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"];
         if ([tail rangeOfCharacterFromSet:allowed.invertedSet].location == NSNotFound) {
-            ext = IKRedactPathSegment(tail.lowercaseString);
+            ext = IKRedact(tail.lowercaseString, IKRedactExtension);
             stem = [name substringToIndex:dot.location];
         }
     }
-    // A fixed file name does not contain spaces. A title does.
-    NSString *shown = [stem containsString:@" "] ? @"<text>" : IKRedactPathSegment(stem);
+    NSString *shown = IKRedact(stem, IKRedactStem);
     if (extension) *extension = ext;
     return ext.length ? [NSString stringWithFormat:@"%@.%@", shown, ext] : shown;
+}
+
+// Image paths read back from the probe's file. Each segment must already be in redacted form.
+static BOOL IKImagePathText(id value) {
+    if (![value isKindOfClass:NSString.class] || ![value length] || [value length] > 240) return NO;
+    NSArray<NSString *> *parts = [value componentsSeparatedByString:@"/"];
+    if (parts.count > 8) return NO;
+    for (NSString *part in parts)
+        if (!part.length || ![IKRedact(part, IKRedactImage) isEqual:part]) return NO;
+    return YES;
 }
 
 #pragma mark - Class inventory text
@@ -146,12 +241,13 @@ static BOOL IKSymbolText(id value, NSUInteger limit) {
     return YES;
 }
 
-static BOOL IKPrintable(id value, NSUInteger limit, BOOL spaces) {
+// Type encodings: printable ASCII without spaces.
+static BOOL IKPrintable(id value, NSUInteger limit) {
     if (![value isKindOfClass:NSString.class] || [value length] > limit + 1) return NO;
     NSUInteger n = [value length];
     for (NSUInteger i = 0; i < n; i++) {
         unichar c = [value characterAtIndex:i];
-        if (c < 0x20 || c > 0x7e || (c == ' ' && !spaces)) return NO;
+        if (c <= 0x20 || c > 0x7e) return NO;
     }
     return YES;
 }
@@ -180,7 +276,7 @@ static void IKAppendMembers(NSMutableArray<NSString *> *lines, id list, NSString
         NSRange space = [item rangeOfString:@" "];
         NSString *name = space.location == NSNotFound ? item : [item substringToIndex:space.location];
         NSString *type = space.location == NSNotFound ? @"" : [item substringFromIndex:space.location + 1];
-        if (!IKSymbolText(name, limits.symbol) || !IKPrintable(type, limits.type, NO)) { (*invalid)++; continue; }
+        if (!IKSymbolText(name, limits.symbol) || !IKPrintable(type, limits.type)) { (*invalid)++; continue; }
         [lines addObject:type.length ? [NSString stringWithFormat:@"  %@ %@ %@", mark, name, type]
                                      : [NSString stringWithFormat:@"  %@ %@", mark, name]];
     }
@@ -199,14 +295,16 @@ NSString *IKClassInventoryReport(NSDictionary *p, NSString *bundle) {
             (unsigned long)IKCount(s[@"classNames"], 100000000), (unsigned long)IKCount(s[@"matched"], 100000000)]];
     }
     for (NSArray *image in IKList(p[@"images"], limits.images)) {
-        if (![image isKindOfClass:NSArray.class] || image.count != 3 || !IKPrintable(image[0], 240, YES) || ![image[0] length]) { invalid++; continue; }
+        if (![image isKindOfClass:NSArray.class] || image.count != 3 || !IKImagePathText(image[0])) { invalid++; continue; }
         [lines addObject:[NSString stringWithFormat:@"image %@ classNames=%lu matched=%lu", image[0],
             (unsigned long)IKCount(image[1], 100000000), (unsigned long)IKCount(image[2], 100000000)]];
     }
     NSUInteger detailed = 0;
     for (NSDictionary *c in IKList(p[@"classes"], limits.classes)) {
-        if (![c isKindOfClass:NSDictionary.class] || !IKSymbolText(c[@"name"], limits.symbol) ||
-            !IKPrintable(c[@"image"], 240, YES)) { invalid++; continue; }
+        if (![c isKindOfClass:NSDictionary.class] || !IKSymbolText(c[@"name"], limits.symbol) || !IKImagePathText(c[@"image"])) {
+            invalid++;
+            continue;
+        }
         NSString *parent = IKSymbolText(c[@"super"], limits.symbol) ? c[@"super"] : @"-";
         NSArray *counts = IKList(c[@"counts"], 4);
         NSMutableArray *totals = [NSMutableArray array];
@@ -237,11 +335,20 @@ NSString *IKClassInventoryReport(NSDictionary *p, NSString *bundle) {
 }
 
 NSString *IKProbeGuardReport(NSDictionary *marker, NSString *bundle) {
-    if (![marker isKindOfClass:NSDictionary.class] || ![bundle isKindOfClass:NSString.class]) return nil;
-    NSUInteger attempts = IKCount(marker[@"attempts"], 99);
-    if (!attempts) return nil;
-    return [NSString stringWithFormat:@"lyric probe app=%@ version=%@ class sampling unfinished attempts=%lu%@", bundle,
-            IKPlayerVersion(marker[@"version"]), (unsigned long)attempts, attempts >= 2 ? @" (stopped retrying for this version)" : @""];
+    if (![marker isKindOfClass:NSDictionary.class] || ![bundle isKindOfClass:NSString.class] ||
+        ![marker[@"attempts"] isKindOfClass:NSDictionary.class]) return nil;
+    NSDictionary *counts = marker[@"attempts"];
+    NSMutableArray<NSString *> *parts = [NSMutableArray array], *stopped = [NSMutableArray array];
+    for (NSString *trigger in @[@"launch", @"playback"]) {
+        NSUInteger attempts = IKCount(counts[trigger], 99);
+        if (!attempts) continue;
+        [parts addObject:[NSString stringWithFormat:@"%@=%lu", trigger, (unsigned long)attempts]];
+        if (attempts >= 2) [stopped addObject:trigger];
+    }
+    if (!parts.count) return nil;
+    NSString *note = stopped.count ? [NSString stringWithFormat:@" (%@ sampling stopped for this version)", [stopped componentsJoinedByString:@"+"]] : @"";
+    return [NSString stringWithFormat:@"lyric probe app=%@ version=%@ class sampling unfinished %@%@", bundle,
+            IKPlayerVersion(marker[@"version"]), [parts componentsJoinedByString:@" "], note];
 }
 
 #pragma mark - Field change events
@@ -344,12 +451,44 @@ static NSString *IKEventLine(NSArray<NSNumber *> *e) {
             flags & 1 ? @" first" : (flags & 2 ? @" newDuration" : @"")];
 }
 
-// Both sides saw the same change when a field changed on both and has the same length.
-static BOOL IKSameChange(NSArray<NSNumber *> *a, NSArray<NSNumber *> *b) {
-    NSUInteger shared = a[4].unsignedIntegerValue & b[4].unsignedIntegerValue;
-    for (NSUInteger i = 0; i < 3; i++)
-        if ((shared & (1u << i)) && [a[5 + i] isEqual:b[5 + i]]) return YES;
-    return NO;
+// The HUD sees the player's dictionary, possibly after several quick calls were merged. So the two sides match on
+// the state after the change, not on which fields changed: the three text lengths, the duration and, when both
+// recorded one, the position. Positions come from the same published dictionary and are compared to 10 ms.
+static BOOL IKSameState(NSArray<NSNumber *> *p, NSArray<NSNumber *> *h, BOOL position) {
+    for (NSUInteger i = 5; i < 8; i++)
+        if (p[i].unsignedIntegerValue != h[i].unsignedIntegerValue) return NO;
+    if (fabs(p[3].doubleValue - h[3].doubleValue) > 0.5) return NO;
+    if (position && p[1].doubleValue >= 0 && h[1].doubleValue >= 0 && fabs(p[1].doubleValue - h[1].doubleValue) > 0.01) return NO;
+    return YES;
+}
+
+// Pairs each HUD change with the one player call in the ten seconds before it that left the same state.
+// Several equal candidates cannot be told apart and are counted as ambiguous instead of guessed.
+// Pairs keep their order: a later HUD change never pairs with a player call before the previous pair.
+static NSArray<NSNumber *> *IKPairEvents(NSArray<NSArray<NSNumber *> *> *sent, NSArray<NSArray<NSNumber *> *> *seen, BOOL position,
+                                         NSUInteger *ambiguous, NSUInteger *unmatched) {
+    NSMutableArray<NSNumber *> *deltas = [NSMutableArray array];
+    *ambiguous = *unmatched = 0;
+    NSUInteger floor = 0;
+    for (NSArray<NSNumber *> *h in seen) {
+        if (h[8].unsignedIntegerValue & 1) continue;  // the HUD's first observation is not a change it received
+        double at = h[0].doubleValue;
+        NSUInteger found = NSNotFound, candidates = 0;
+        for (NSUInteger k = floor; k < sent.count && sent[k][0].doubleValue <= at; k++) {
+            if (sent[k][0].doubleValue < at - 10 || !IKSameState(sent[k], h, position)) continue;
+            candidates++;
+            found = k;
+        }
+        if (candidates == 1) {
+            [deltas addObject:@(at - sent[found][0].doubleValue)];
+            floor = found + 1;
+        } else if (candidates) {
+            (*ambiguous)++;
+        } else {
+            (*unmatched)++;
+        }
+    }
+    return deltas;
 }
 
 static double IKBoot(NSDictionary *p) {
@@ -379,31 +518,26 @@ NSString *IKLyricEventsReport(NSDictionary *player, NSDictionary *hud, NSString 
         [lines addObject:[NSString stringWithFormat:@"lyric latency app=%@ paired=0 reason=%@", bundle, reason]];
         return [lines componentsJoinedByString:@"\n"];
     }
-    // Keep the order: a change the HUD saw pairs with the first unpaired change the player set in the ten seconds before it.
-    // Both sides read the same uptime clock, so the HUD is never earlier.
-    NSMutableArray<NSNumber *> *deltas = [NSMutableArray array];
-    NSUInteger next = 0;
-    for (NSArray<NSNumber *> *h in seen) {
-        if (h[8].unsignedIntegerValue & 1) continue;
-        double at = h[0].doubleValue;
-        while (next < sent.count && sent[next][0].doubleValue < at - 10) next++;
-        for (NSUInteger k = next; k < sent.count && sent[k][0].doubleValue <= at; k++) {
-            if ((sent[k][8].unsignedIntegerValue & 1) || !IKSameChange(sent[k], h)) continue;
-            [deltas addObject:@(at - sent[k][0].doubleValue)];
-            next = k + 1;
-            break;
-        }
+    NSUInteger ambiguous = 0, unmatched = 0;
+    NSArray<NSNumber *> *deltas = IKPairEvents(sent, seen, YES, &ambiguous, &unmatched);
+    NSString *match = @"state+position";
+    if (!deltas.count) {
+        // In case the system rewrites the published position, try once more without it. Equal candidates still do not pair.
+        NSUInteger looseAmbiguous = 0, looseUnmatched = 0;
+        NSArray *loose = IKPairEvents(sent, seen, NO, &looseAmbiguous, &looseUnmatched);
+        if (loose.count) { deltas = loose; ambiguous = looseAmbiguous; unmatched = looseUnmatched; match = @"state"; }
     }
     if (!deltas.count) {
-        [lines addObject:[NSString stringWithFormat:@"lyric latency app=%@ paired=0 reason=no-overlap", bundle]];
+        [lines addObject:[NSString stringWithFormat:@"lyric latency app=%@ paired=0 ambiguous=%lu unmatched=%lu reason=%@", bundle,
+            (unsigned long)ambiguous, (unsigned long)unmatched, ambiguous ? @"ambiguous" : @"no-overlap"]];
         return [lines componentsJoinedByString:@"\n"];
     }
-    [deltas sortUsingSelector:@selector(compare:)];
+    deltas = [deltas sortedArrayUsingSelector:@selector(compare:)];
     NSUInteger n = deltas.count;
     [lines addObject:[NSString stringWithFormat:
-        @"lyric latency app=%@ paired=%lu player=%lu hud=%lu min=%.3f median=%.3f p90=%.3f max=%.3f (seconds, HUD seen minus player set)",
-        bundle, (unsigned long)n, (unsigned long)sent.count, (unsigned long)seen.count, deltas[0].doubleValue,
-        deltas[n / 2].doubleValue, deltas[MIN(n - 1, (n * 9) / 10)].doubleValue, deltas[n - 1].doubleValue]];
+        @"lyric latency app=%@ paired=%lu ambiguous=%lu unmatched=%lu player=%lu hud=%lu match=%@ min=%.3f median=%.3f p90=%.3f max=%.3f (seconds, HUD seen minus player set)",
+        bundle, (unsigned long)n, (unsigned long)ambiguous, (unsigned long)unmatched, (unsigned long)sent.count, (unsigned long)seen.count, match,
+        deltas[0].doubleValue, deltas[n / 2].doubleValue, deltas[MIN(n - 1, (n * 9) / 10)].doubleValue, deltas[n - 1].doubleValue]];
     return [lines componentsJoinedByString:@"\n"];
 }
 

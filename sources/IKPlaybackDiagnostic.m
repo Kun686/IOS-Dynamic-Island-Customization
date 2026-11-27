@@ -1,4 +1,8 @@
 #import "IKPlaybackDiagnostic.h"
+#import <errno.h>
+#import <fcntl.h>
+#import <sys/stat.h>
+#import <unistd.h>
 
 BOOL IKMetadataSymbol(id key) {
     if (![key isKindOfClass:NSString.class] || ![key length] || [key length] > 96) return NO;
@@ -46,18 +50,34 @@ static NSArray<NSString *> *IKFileExtensions(void) {
     return @[@"lrc",@"qrc",@"yrc",@"txt",@"json",@"xml",@"dat",@"bin",@"plist",@"cache",@"other"];
 }
 
+NSDictionary *IKLyricShapeAt(int directory, const char *name, NSString *extension) {
+    if (!name || !*name) return nil;
+    // O_NONBLOCK keeps a FIFO swapped in after the directory listing from blocking the open.
+    int file = openat(directory, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+    if (file < 0) return nil;
+    struct stat info;
+    if (fstat(file, &info) || !S_ISREG(info.st_mode)) { close(file); return nil; }
+    uint8_t buffer[512];
+    size_t total = 0;
+    BOOL failed = NO;
+    while (total < sizeof(buffer)) {
+        ssize_t n = read(file, buffer + total, sizeof(buffer) - total);
+        if (n < 0 && errno == EINTR) continue;
+        if (n < 0) failed = YES;
+        if (n <= 0) break;
+        total += (size_t)n;
+    }
+    close(file);
+    NSData *sample = failed && !total ? nil : [NSData dataWithBytes:buffer length:total];
+    NSString *ext = extension.lowercaseString;
+    if (![IKFileExtensions() containsObject:ext ?: @""]) ext = @"other";
+    unsigned long long bytes = info.st_size > 0 ? (unsigned long long)info.st_size : 0;
+    return @{@"ext":ext, @"bytes":@(bytes), @"header":bytes ? IKHeaderKind(sample) : @"empty"};
+}
+
 NSDictionary *IKLyricFileShape(NSURL *url) {
     if (!url.isFileURL) return nil;
-    NSNumber *regular=nil, *size=nil, *symlink=nil;
-    if (![url getResourceValue:&regular forKey:NSURLIsRegularFileKey error:nil] || !regular.boolValue ||
-        ![url getResourceValue:&symlink forKey:NSURLIsSymbolicLinkKey error:nil] || symlink.boolValue ||
-        ![url getResourceValue:&size forKey:NSURLFileSizeKey error:nil]) return nil;
-    NSFileHandle *handle = [NSFileHandle fileHandleForReadingFromURL:url error:nil];
-    NSData *sample = [handle readDataUpToLength:512 error:nil];
-    [handle closeAndReturnError:nil];
-    NSString *ext = url.pathExtension.lowercaseString;
-    if (![IKFileExtensions() containsObject:ext ?: @""]) ext = @"other";
-    return @{@"ext":ext, @"bytes":size, @"header":size.unsignedLongLongValue ? IKHeaderKind(sample) : @"empty"};
+    return IKLyricShapeAt(AT_FDCWD, url.fileSystemRepresentation, url.pathExtension);
 }
 
 NSString *IKFileShapeSummary(NSDictionary *shape) {
