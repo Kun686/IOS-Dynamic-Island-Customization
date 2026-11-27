@@ -12,6 +12,7 @@
 #import <UIKit/UIKit.h>
 
 #import "HUDHelper.h"
+#import "../sources/IKMusicCenter.h"
 
 typedef NSString * HUDUserDefaultsKey;
 

@@ -8,20 +8,28 @@ struct Settings {
     var spin = true
     var pauseStops = true
     var transitionStyle = 0    // 0 回弹下落 / 1 柔和滑入 / 2 淡入 / 3 缩放弹出 / 4 果冻
-    var windowLevelBoost = 0   // 0 默认 / 1 更高 / 2 最高
+    var windowLevelBoost = 0   // 0 自动（覆盖模式最高、下挂模式标准）/ 1 更高 / 2 最高
     var placement = 0          // 0 岛下方 / 1 覆盖岛
+    var coverExtraWidth = 3.0  // 覆盖模式：胶囊比开孔多出来的宽度（两侧合计）
+    var coverExtraHeight = 3.0 // 覆盖模式：胶囊比开孔多出来的高度（上下合计）
+    var coverOffsetY = 0.0     // 覆盖模式：整体上下修正
+    var calibrateUntil = 0.0   // 在这个时刻（Unix 时间）之前，悬浮进程画出覆盖范围的描边
     var progressRing = true
     var lyricEffect = 1        // 0 无 / 1 逐行填色 / 2 淡入
     var lyricFontSize = 16.0
     var lyricColorMode = 0     // 0 强调色 / 1 跟随封面 / 2 自定义
+    var titleColorMode = 3     // 同上，另有 3 默认白色
     var ringColorMode = 1
     var lyricColor = "#B8F34A"
+    var titleColor = "#FFFFFF"
     var ringColor = "#B8F34A"
     var lyricLines = 2
     var spinSeconds = 8.0
     var notifDuration = 5.0
     var notifApps: [String] = []
     var accent = "#B8F34A"
+    var notifTitleColor = "#FFFFFF"
+    var notifMessageColor = "#A8A8B0"
 
     init() {}
 
@@ -35,13 +43,21 @@ struct Settings {
         windowLevelBoost = d["windowLevelBoost"] as? Int ?? windowLevelBoost
         lyricLines = d["lyricLines"] as? Int ?? lyricLines
         placement = d["placement"] as? Int ?? placement
+        coverExtraWidth = d["coverExtraWidth"] as? Double ?? coverExtraWidth
+        coverExtraHeight = d["coverExtraHeight"] as? Double ?? coverExtraHeight
+        coverOffsetY = d["coverOffsetY"] as? Double ?? coverOffsetY
+        calibrateUntil = d["calibrateUntil"] as? Double ?? calibrateUntil
         progressRing = d["progressRing"] as? Bool ?? progressRing
         lyricEffect = d["lyricEffect"] as? Int ?? lyricEffect
         lyricFontSize = d["lyricFontSize"] as? Double ?? lyricFontSize
         lyricColorMode = d["lyricColorMode"] as? Int ?? lyricColorMode
+        titleColorMode = d["titleColorMode"] as? Int ?? titleColorMode
         ringColorMode = d["ringColorMode"] as? Int ?? ringColorMode
         lyricColor = d["lyricColor"] as? String ?? lyricColor
+        titleColor = d["titleColor"] as? String ?? d["songTitleColor"] as? String ?? titleColor
         ringColor = d["ringColor"] as? String ?? ringColor
+        notifTitleColor = d["notifTitleColor"] as? String ?? notifTitleColor
+        notifMessageColor = d["notifMessageColor"] as? String ?? notifMessageColor
         spinSeconds = d["spinSeconds"] as? Double ?? spinSeconds
         notifDuration = d["notifDuration"] as? Double ?? notifDuration
         notifApps = d["notifApps"] as? [String] ?? notifApps
@@ -58,13 +74,27 @@ struct Settings {
             "lyricEffect": lyricEffect, "lyricFontSize": lyricFontSize,
             "lyricColorMode": lyricColorMode, "ringColorMode": ringColorMode,
             "lyricColor": lyricColor, "ringColor": ringColor,
+            "titleColorMode": titleColorMode, "titleColor": titleColor, "songTitleColor": titleColor,
+            "coverExtraWidth": coverExtraWidth, "coverExtraHeight": coverExtraHeight,
+            "coverOffsetY": coverOffsetY, "calibrateUntil": calibrateUntil,
+            "notifTitleColor": notifTitleColor, "notifMessageColor": notifMessageColor,
         ]
+    }
+
+    // 设置界面里的预览没有专辑封面，“跟随封面”时用强调色代替
+    func previewColor(mode: Int, custom: String) -> Color {
+        switch mode {
+        case 2: return Color(hex: custom)
+        case 3: return .white
+        default: return Color(hex: accent)
+        }
     }
 }
 
 final class Store: ObservableObject {
     static let path = "/var/mobile/Library/Preferences/com.islandkit.prefs.plist"
     static let darwinName = "com.islandkit.prefs/changed"
+    static let demoDarwinName = "com.islandkit.demo/transition"
 
     @Published var s = Settings() {
         didSet { save() }
@@ -75,6 +105,25 @@ final class Store: ObservableObject {
         if let d = NSDictionary(contentsOfFile: Store.path) as? [String: Any] {
             s = Settings(dict: d)
         }
+        // 上次如果在校准时被杀掉，描边不能一直留在屏幕上
+        if s.calibrateUntil != 0 {
+            s.calibrateUntil = 0
+            save()
+        }
+    }
+
+    // 让悬浮进程用当前选中的过渡动画把“出现 → 收起”演示一遍。配置已经在改动时写入并通知过了
+    func demoTransition() {
+        CFNotificationCenterPostNotification(
+            CFNotificationCenterGetDarwinNotifyCenter(),
+            CFNotificationName(Store.demoDarwinName as CFString), nil, nil, true)
+    }
+
+    // 校准描边：开着的时候定期续期，关掉或离开页面时清零
+    var calibrating: Bool { s.calibrateUntil > Date().timeIntervalSince1970 }
+
+    func setCalibrating(_ on: Bool) {
+        s.calibrateUntil = on ? Date().timeIntervalSince1970 + 90 : 0
     }
 
     private func save() {

@@ -4,6 +4,7 @@
 void MRMediaRemoteRegisterForNowPlayingNotifications(dispatch_queue_t queue);
 void MRMediaRemoteGetNowPlayingInfo(dispatch_queue_t queue, void (^handler)(CFDictionaryRef info));
 void MRMediaRemoteGetNowPlayingApplicationIsPlaying(dispatch_queue_t queue, void (^handler)(Boolean playing));
+void MRMediaRemoteGetNowPlayingApplicationDisplayID(dispatch_queue_t queue, void (^handler)(NSString *displayID));
 
 extern NSString *kMRMediaRemoteNowPlayingInfoDidChangeNotification;
 extern NSString *kMRMediaRemoteNowPlayingApplicationIsPlayingDidChangeNotification;
@@ -16,3 +17,8 @@ extern CFStringRef kMRMediaRemoteNowPlayingInfoDuration;
 extern CFStringRef kMRMediaRemoteNowPlayingInfoElapsedTime;
 extern CFStringRef kMRMediaRemoteNowPlayingInfoTimestamp;
 extern CFStringRef kMRMediaRemoteNowPlayingInfoPlaybackRate;
+
+extern CFStringRef kMRMediaRemoteNowPlayingInfoExternalContentIdentifier;
+extern CFStringRef kMRMediaRemoteNowPlayingInfoUniqueIdentifier;
+extern CFStringRef kMRMediaRemoteNowPlayingInfoQueueIndex;
+extern NSString *kMRMediaRemoteNowPlayingApplicationDidChangeNotification;
