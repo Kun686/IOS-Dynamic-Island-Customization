@@ -18,6 +18,7 @@ typedef NS_ENUM(NSInteger, IKState) {
 @interface IKIslandView : UIView
 @property (nonatomic) IKState state;
 @property (nonatomic) NSInteger lyricLines;
+@property (nonatomic) NSInteger lyricAlignment;
 @property (nonatomic) CGFloat cutoutWidth;
 // 覆盖模式下，开孔下沿在本视图坐标里的位置；文字要放到它下面
 @property (nonatomic) CGFloat cutoutBand;

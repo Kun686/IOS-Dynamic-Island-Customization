@@ -24,6 +24,8 @@ struct Settings {
     var titleColor = "#FFFFFF"
     var ringColor = "#B8F34A"
     var lyricLines = 2
+    var lyricAlignment = 0
+    var defaultMusicView = 0
     var spinSeconds = 8.0
     var notifDuration = 5.0
     var notifApps: [String] = []
@@ -42,6 +44,8 @@ struct Settings {
         transitionStyle = d["transitionStyle"] as? Int ?? transitionStyle
         windowLevelBoost = d["windowLevelBoost"] as? Int ?? windowLevelBoost
         lyricLines = d["lyricLines"] as? Int ?? lyricLines
+        if let choice = d["lyricAlignment"] as? Int, (0...2).contains(choice) { lyricAlignment = choice }
+        defaultMusicView = (d["defaultMusicView"] as? Int == 1) ? 1 : 0
         placement = d["placement"] as? Int ?? placement
         coverExtraWidth = d["coverExtraWidth"] as? Double ?? coverExtraWidth
         coverExtraHeight = d["coverExtraHeight"] as? Double ?? coverExtraHeight
@@ -68,6 +72,7 @@ struct Settings {
         [
             "enabled": enabled, "notif": notif, "lyric": lyric, "spin": spin,
             "pauseStops": pauseStops, "lyricLines": lyricLines,
+            "lyricAlignment": lyricAlignment, "defaultMusicView": defaultMusicView,
             "transitionStyle": transitionStyle, "windowLevelBoost": windowLevelBoost,
             "spinSeconds": spinSeconds, "notifDuration": notifDuration,
             "notifApps": notifApps, "accent": accent, "placement": placement, "progressRing": progressRing,

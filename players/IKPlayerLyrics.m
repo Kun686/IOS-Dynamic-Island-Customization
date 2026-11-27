@@ -140,12 +140,15 @@ static NSArray *IKPlayerLines(NSArray *inputs, NSURL *assetURL, double duration,
 @property(nonatomic) NSUInteger accessEvents, jumpEvents;
 @property(nonatomic, strong) NSURL *file;
 @property(nonatomic, strong) dispatch_source_t timer;
+@property(nonatomic) BOOL samplePending;
+@property(nonatomic, copy) NSString *phase;
 @end
 
 @implementation IKPlayerLyrics
 - (void)watchItem:(AVPlayerItem *)item track:(NSDictionary *)track {
     if (self.observedItem == item && (item ? IKSameRecording(track,self.observedTrack) : !self.output)) return;
-    if (self.output && self.observedItem) [self.observedItem removeOutput:self.output];
+    AVPlayerItem *previous = self.observedItem;
+    if (self.output && [previous.outputs containsObject:self.output]) [previous removeOutput:self.output];
     self.observedItem = item;
     self.observedTrack = track;
     self.output = nil;
@@ -272,21 +275,43 @@ static NSArray *IKPlayerLines(NSArray *inputs, NSURL *assetURL, double duration,
     }
 }
 
-- (void)publish {
-    NSString *bundle = NSBundle.mainBundle.bundleIdentifier;
-    NSDictionary *info = MPNowPlayingInfoCenter.defaultCenter.nowPlayingInfo;
-    if ([self writeInfo:info bundle:bundle]) {
-        CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR(IKLyricsChangedDarwin), NULL, NULL, true);
+- (void)recordPhase:(NSString *)phase bundle:(NSString *)bundle {
+    self.phase = IKRecordPlaybackPhase(self.file.URLByDeletingLastPathComponent, bundle, self.phase, phase);
+}
+
+- (void)consumeInfo:(NSDictionary *)info bundle:(NSString *)bundle {
+    if (info && ![info isKindOfClass:NSDictionary.class]) {
+        [self recordPhase:@"invalid-metadata" bundle:bundle];
+        return;
     }
-    IKWritePlaybackSignals(self.file.URLByDeletingLastPathComponent,bundle,info,self.accessEvents,self.jumpEvents,self.lyricEvidence);
-    if (self.publishedRecording)
-        CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR(IKRecordingChangedDarwin), NULL, NULL, true);
-    [self publishClockForBundle:bundle];
+    @try {
+        if ([self writeInfo:info bundle:bundle]) {
+            CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR(IKLyricsChangedDarwin), NULL, NULL, true);
+        }
+        IKWritePlaybackSignals(self.file.URLByDeletingLastPathComponent,bundle,info,self.accessEvents,self.jumpEvents,self.lyricEvidence);
+        if (self.publishedRecording)
+            CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR(IKRecordingChangedDarwin), NULL, NULL, true);
+        [self publishClockForBundle:bundle];
+        [self recordPhase:info.count ? @"sampling" : @"idle" bundle:bundle];
+    } @catch (__unused NSException *exception) {
+        [self recordPhase:@"sample-error" bundle:bundle];
+    }
+}
+
+// The timer and AV callbacks share the serial queue. Take one snapshot at a time on the main queue.
+- (void)publish {
+    if (self.samplePending) return;
+    self.samplePending = YES;
+    IKReadPlaybackInfo(self.queue, ^(NSDictionary *info, NSString *issue) {
+        self.samplePending = NO;
+        NSString *bundle = NSBundle.mainBundle.bundleIdentifier;
+        if (issue) [self recordPhase:issue bundle:bundle];
+        else [self consumeInfo:info bundle:bundle];
+    });
 }
 
 - (void)start {
-    NSURL *library = [NSFileManager.defaultManager URLsForDirectory:NSLibraryDirectory inDomains:NSUserDomainMask].firstObject;
-    self.file = [library URLByAppendingPathComponent:@"IslandKit/lyrics.plist"];
+    if (self.timer) return;
     dispatch_queue_t q = dispatch_queue_create("com.islandkit.player.lyrics", DISPATCH_QUEUE_SERIAL);
     self.queue = q;
     for (NSNotificationName name in @[AVPlayerItemNewAccessLogEntryNotification, AVPlayerItemTimeJumpedNotification]) {
@@ -313,7 +338,10 @@ __attribute__((constructor)) static void IKStartLyrics(void) {
         if (bid.length && [bid caseInsensitiveCompare:@IK_PLAYER_BUNDLE] == NSOrderedSame) {
             static IKPlayerLyrics *player;
             player = [IKPlayerLyrics new];
-            [player start];
+            NSURL *library = [NSFileManager.defaultManager URLsForDirectory:NSLibraryDirectory inDomains:NSUserDomainMask].firstObject;
+            player.file = [library URLByAppendingPathComponent:@"IslandKit/lyrics.plist"];
+            [player recordPhase:@"loaded" bundle:bid];
+            IKWhenPlayerIsActive(^{ [player start]; });
         }
     });
 }

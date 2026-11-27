@@ -491,17 +491,42 @@ static NSString *IKSelectedShapePath(NSString *bundle) {
 }
 
 + (NSString *)playbackDiagnosticReport {
-    NSMutableArray *parts = [NSMutableArray array];
+    NSString *release = NSBundle.mainBundle.infoDictionary[@"CFBundleShortVersionString"] ?: @"?";
+    NSMutableArray *parts = [NSMutableArray arrayWithObject:[@"IslandKit 播放诊断 " stringByAppendingString:release]];
     for (NSString *bid in @[@"com.tencent.QQMusic",@"com.netease.cloudmusic"]) {
         NSString *path = IKPlayerLyricsPath(bid);
+        NSDictionary *launch = IKSnapshot(IKAdjacentFile(path,IKPlaybackLaunchName));
+        NSDictionary *phases = @{@"loaded":@"已加载，等待播放器前台及首次采样", @"idle":@"采样成功，暂未播放",
+            @"sampling":@"收到播放信息", @"read-error":@"读取播放信息异常", @"sample-error":@"处理播放样本异常",
+            @"invalid-metadata":@"播放器返回了不支持的元数据类型"};
+        NSString *phase = [launch[@"bundleID"] isEqual:bid] && [launch[@"phase"] isKindOfClass:NSString.class] ? phases[launch[@"phase"]] : nil;
+        NSString *when = @"";
+        double stamp = [launch[@"wall"] isKindOfClass:NSNumber.class] ? [launch[@"wall"] doubleValue] : 0;
+        if (phase && isfinite(stamp) && stamp > 0 && stamp < 1e11) {
+            NSDate *date = [NSDate dateWithTimeIntervalSince1970:stamp];
+            when = [@" " stringByAppendingString:[[NSISO8601DateFormatter new] stringFromDate:date]];
+        }
+        NSString *version = phase ? [@" 播放器版本=" stringByAppendingString:IKPlayerVersion(launch[@"version"])] : @"";
+        [parts addObject:[NSString stringWithFormat:@"%@ 适配器最后记录=%@%@%@",
+            bid, phase ?: (path ? @"未读到启动记录" : @"播放器容器不可用"), when, version]];
         NSString *history = path ? IKDiagnosticHistory([NSURL fileURLWithPath:path.stringByDeletingLastPathComponent],bid) : nil;
         if (!history) history = IKDiagnosticSummary(IKSnapshot(IKAdjacentFile(path,IKPlaybackDiagnosticsName)),bid,
                                                    NSProcessInfo.processInfo.systemUptime,NSDate.date.timeIntervalSince1970);
-        if (history) [parts addObject:history];
+        [parts addObject:history ?: @"未读到可用的播放器采样。"];
         NSString *file = IKFileShapeSummary(IKSnapshot(IKSelectedShapePath(bid)));
         if (file) [parts addObject:[NSString stringWithFormat:@"%@ selected/%@",bid,file]];
     }
-    return parts.count ? [parts componentsJoinedByString:@"\n"] : nil;
+    // Older HUDs already recorded these events. Export only known fields, never free-form log lines.
+    NSURL *url = [NSURL fileURLWithPath:[IKDataDir stringByAppendingPathComponent:@"island.log"]];
+    NSString *log = [[NSString alloc] initWithData:IKReadLyricFile(url) ?: [NSData data] encoding:NSUTF8StringEncoding];
+    NSString *pattern = @"(?m)^\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2} (?:recording app=(?:com\\.tencent\\.QQMusic|com\\.netease\\.cloudmusic) externalID=[01] persistentID=[01] queueIndex=[01]|lyric field=[0-3]|interaction tap state=[0-3] notif=[01]|interaction longPress state=(?:compact|lyric))$";
+    NSRegularExpression *events = [NSRegularExpression regularExpressionWithPattern:pattern options:0 error:nil];
+    NSArray *matches = log ? [events matchesInString:log options:0 range:NSMakeRange(0,log.length)] : nil;
+    [parts addObject:matches.count ? @"悬浮窗最近的播放与切换记录" : @"悬浮窗尚无可导出的播放或切换记录。"];
+    for (NSUInteger i = matches.count > 24 ? matches.count - 24 : 0; i < matches.count; i++) {
+        [parts addObject:[log substringWithRange:[matches[i] range]]];
+    }
+    return [parts componentsJoinedByString:@"\n"];
 }
 
 // The settings file picker supplies the root. Only shapes leave this method.

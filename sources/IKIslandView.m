@@ -16,6 +16,7 @@
 - (instancetype)initWithFrame:(CGRect)frame {
     if ((self = [super initWithFrame:frame])) {
         _period = 8;
+        self.clipsToBounds = YES;
         _disc = [UIImageView new];
         _disc.contentMode = UIViewContentModeScaleAspectFill;
         _disc.clipsToBounds = YES;
@@ -31,6 +32,7 @@
 - (void)layoutSubviews {
     [super layoutSubviews];
     CGFloat s = MIN(self.bounds.size.width, self.bounds.size.height);
+    self.layer.cornerRadius = s / 2;
     self.disc.bounds = CGRectMake(0, 0, s, s);
     self.disc.center = CGPointMake(CGRectGetMidX(self.bounds), CGRectGetMidY(self.bounds));
     self.disc.layer.cornerRadius = s / 2;
@@ -192,6 +194,7 @@ typedef NS_ENUM(NSInteger, IKLineChange) {
 @property (nonatomic, strong) UILabel *topLabel;    // 高亮层，叠在 baseLabel 上
 @property (nonatomic, strong) CALayer *fillMask;
 @property (nonatomic) CGFloat textWidth;
+@property (nonatomic) NSInteger alignment;
 @property (nonatomic) double duration;
 @property (nonatomic) double startTime;             // 这一行开始的时刻（CACurrentMediaTime 基准）
 @property (nonatomic) double pausedFraction;
@@ -261,6 +264,12 @@ typedef NS_ENUM(NSInteger, IKLineChange) {
     [self setNeedsLayout];
 }
 
+- (void)setAlignment:(NSInteger)alignment {
+    if (_alignment == alignment) return;
+    _alignment = alignment;
+    [self setNeedsLayout];
+}
+
 - (void)measure {
     self.textWidth = self.text.length
         ? ceil([self.text sizeWithAttributes:@{NSFontAttributeName: self.font}].width) + 1 : 0;
@@ -319,12 +328,10 @@ typedef NS_ENUM(NSInteger, IKLineChange) {
     [super layoutSubviews];
     CGFloat W = self.bounds.size.width, H = self.bounds.size.height;
     CGFloat lw = self.truncates ? W : self.textWidth;
-    // track 左对齐在本行的 x = 0：宽 lw、中心在 lw / 2，等价于 frame = (0, 0, lw, H)，
-    // 所以平移 0 时看到的是文字开头，平移 -(lw - W) 时文字末尾正好贴着本行右边。
-    // 不直接设 frame，是因为 track 上带着滚动用的平移变换
+    // Use center and bounds because the track may have an independent scrolling transform.
     void (^place)(void) = ^{
         self.track.bounds = CGRectMake(0, 0, lw, H);
-        self.track.center = CGPointMake(lw / 2, H / 2);
+        self.track.center = CGPointMake(IKTextOrigin(W, lw, self.alignment) + lw / 2, H / 2);
         self.baseLabel.frame = self.track.bounds;
         self.topLabel.frame = self.track.bounds;
     };
@@ -471,6 +478,7 @@ typedef NS_ENUM(NSInteger, IKTextKind) {
 @property (nonatomic) BOOL iconRound;
 @property (nonatomic) IKTextKind textKind;
 @property (nonatomic, strong) CADisplayLink *sizeLink;
+@property (nonatomic) BOOL resizingShell;
 @property (nonatomic) CGSize drawnSize;
 @property (nonatomic, strong) CAShapeLayer *ringTrack;
 @property (nonatomic, strong) CAShapeLayer *ring;
@@ -523,8 +531,8 @@ typedef NS_ENUM(NSInteger, IKTextKind) {
         _ring.strokeEnd = 0;
         _ringTrack.hidden = YES;
         _ring.hidden = YES;
-        [_content.layer addSublayer:_ringTrack];
-        [_content.layer addSublayer:_ring];
+        [_content.layer insertSublayer:_ringTrack atIndex:0];
+        [_content.layer insertSublayer:_ring above:_ringTrack];
         self.accent = [UIColor whiteColor];
     }
     return self;
@@ -559,6 +567,8 @@ typedef NS_ENUM(NSInteger, IKTextKind) {
             break;
     }
     self.row1.textColor = c1;
+    self.row1.alignment = self.textKind == IKTextKindNotif ? 0 : self.lyricAlignment;
+    self.row2.alignment = self.row1.alignment;
     self.row1.highlightColor = h1;
     self.row1.truncates = truncates;
     self.row2.textColor = c2;
@@ -603,9 +613,16 @@ typedef NS_ENUM(NSInteger, IKTextKind) {
 }
 
 - (void)setLyricLines:(NSInteger)lyricLines {
+    if (_lyricLines == lyricLines) return;
     _lyricLines = lyricLines;
     [self applyTextStyles];
     [self setNeedsLayout];
+}
+
+- (void)setLyricAlignment:(NSInteger)lyricAlignment {
+    if (_lyricAlignment == lyricAlignment) return;
+    _lyricAlignment = lyricAlignment;
+    [self applyTextStyles];
 }
 
 - (void)setContentAlpha:(CGFloat)contentAlpha {
@@ -694,8 +711,11 @@ typedef NS_ENUM(NSInteger, IKTextKind) {
 
 - (void)setShowsProgress:(BOOL)showsProgress {
     _showsProgress = showsProgress;
-    self.ring.hidden = !showsProgress;
-    self.ringTrack.hidden = !showsProgress;
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    self.ring.hidden = !showsProgress || self.resizingShell;
+    self.ringTrack.hidden = self.ring.hidden;
+    [CATransaction commit];
 }
 
 - (void)setProgress:(CGFloat)progress {
@@ -748,15 +768,21 @@ typedef NS_ENUM(NSInteger, IKTextKind) {
 #pragma mark 布局
 
 - (void)beginFollowingShell {
-    if (self.sizeLink) return;
-    self.drawnSize = self.content.bounds.size;
+    if (self.resizingShell) return;
+    self.resizingShell = YES;
+    self.drawnSize = (self.layer.presentationLayer ?: self.layer).bounds.size;
     self.sizeLink = [CADisplayLink displayLinkWithTarget:self selector:@selector(followShell:)];
+    [self setShowsProgress:self.showsProgress];
     [self.sizeLink addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
+    [self setNeedsLayout];
 }
 
 - (void)endFollowingShell {
+    self.resizingShell = NO;
     [self.sizeLink invalidate];
     self.sizeLink = nil;
+    [UIView performWithoutAnimation:^{ [self layoutContentForSize:self.bounds.size]; }];
+    [self setShowsProgress:self.showsProgress];
     [self setNeedsLayout];
 }
 
@@ -769,7 +795,7 @@ typedef NS_ENUM(NSInteger, IKTextKind) {
 
 - (void)layoutSubviews {
     [super layoutSubviews];
-    CGSize size = self.sizeLink ? self.drawnSize : self.bounds.size;
+    CGSize size = self.resizingShell ? (self.sizeLink ? self.drawnSize : CGSizeZero) : self.bounds.size;
     [UIView performWithoutAnimation:^{ [self layoutContentForSize:size]; }];
 }
 
@@ -785,18 +811,19 @@ typedef NS_ENUM(NSInteger, IKTextKind) {
     BOOL two     = notif || (lyric && self.lyricLines >= 2);
 
     CGFloat bandHeight = self.cutoutBand > 0 ? self.cutoutBand : 37;
-    IKCoverTextLayout rows = IKCoverRows(size, bandHeight, notif ? 70 : 76, two);
+    CGRect disc = IKCoverDisc(size, self.cutoutWidth, bandHeight);
+    IKCoverTextLayout rows = IKCoverRows(size, bandHeight, notif ? 70 : CGRectGetMaxX(disc) + 12, two);
     CGFloat side = MAX(0,(W-self.cutoutWidth)/2);
     BOOL decorFits = !self.coversCutout || side >= 32;
     BOOL textFits = self.coversCutout ? rows.fits : (W >= (notif ? 200 : 104) && H >= (two ? 42 : 24));
-    self.cover.hidden    = !(compact || lyric) || !decorFits;
+    self.cover.hidden    = !(compact || lyric) || !decorFits || (self.coversCutout && lyric && disc.size.width < 22);
     self.barsView.hidden = !(compact || lyric) || !decorFits;
     self.iconView.hidden = !notif || !decorFits;
     self.appLabel.hidden = !notif || !decorFits;
     self.row1.hidden     = !(lyric || notif) || !textFits;
     self.row2.hidden     = !two || !textFits;
 
-    [self layoutRingWithCornerRadius:radius size:size];
+    if (!self.resizingShell) [self layoutRingWithCornerRadius:radius size:size];
 
     if (!self.coversCutout) {
         // 独立胶囊：左边封面或图标，中间文字，右边音柱
@@ -828,8 +855,7 @@ typedef NS_ENUM(NSInteger, IKTextKind) {
             self.cover.frame = CGRectMake(5, (H - 27) / 2, 27, 27);
             self.barsView.frame = CGRectMake(W - 14 - 18, (H - 16) / 2, 18, 16);
         } else if (lyric) {
-            CGFloat coverSize = MAX(0,MIN(52,MIN(H-6,side-12)));
-            self.cover.frame = CGRectMake(12, (H-coverSize)/2, coverSize, coverSize);
+            self.cover.frame = disc;
             self.barsView.frame = CGRectMake(W - 20 - 18, (band - 16) / 2, 18, 16);
             self.row1.frame = rows.first;
             self.row2.frame = rows.second;
@@ -843,6 +869,7 @@ typedef NS_ENUM(NSInteger, IKTextKind) {
         }
     }
     self.iconView.layer.cornerRadius = self.iconRound ? self.iconView.bounds.size.width / 2 : 11;
+    [self.content layoutIfNeeded];
 }
 
 @end

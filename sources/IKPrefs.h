@@ -24,6 +24,8 @@
 @property (nonatomic) BOOL spinEnabled;
 @property (nonatomic) BOOL pauseStopsSpin;
 @property (nonatomic) NSInteger lyricLines;      // 1 或 2
+@property (nonatomic) NSInteger lyricAlignment;  // 0 左、1 中、2 右
+@property (nonatomic) BOOL defaultCompact;
 @property (nonatomic) double spinSeconds;        // 转一圈用时
 @property (nonatomic) double notifDuration;      // 通知停留秒数
 @property (nonatomic, copy) NSSet<NSString *> *notifApps;

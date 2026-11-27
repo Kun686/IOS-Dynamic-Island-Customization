@@ -14,6 +14,7 @@
 @property(nonatomic, strong) NSMutableDictionary *streamCues;
 - (void)metadataOutput:(AVPlayerItemMetadataOutput *)output didOutputTimedMetadataGroups:(NSArray *)groups fromPlayerItemTrack:(AVPlayerItemTrack *)track;
 - (void)publish;
+- (void)consumeInfo:(NSDictionary *)info bundle:(NSString *)bundle;
 - (BOOL)writeInfo:(NSDictionary *)info bundle:(NSString *)bundle;
 @end
 
@@ -22,6 +23,19 @@
 @end
 @implementation StreamProbe
 - (void)publish { self.events++; }
+@end
+
+@interface InterruptiblePlayer : IKPlayerLyrics
+@property(nonatomic) BOOL failNextRead;
+@end
+@implementation InterruptiblePlayer
+- (BOOL)writeInfo:(NSDictionary *)info bundle:(NSString *)bundle {
+    if (self.failNextRead) {
+        self.failNextRead = NO;
+        [NSException raise:NSInvalidArgumentException format:@"fixture media item was replaced"];
+    }
+    return [super writeInfo:info bundle:bundle];
+}
 @end
 
 @interface TestProxy : NSObject
@@ -335,6 +349,31 @@ int main(int argc, const char *argv[]) { @autoreleasepool {
     check(IKCoverRows(CGSizeMake(358,94),38,76,YES).fits, "expanded music fits both rows");
     check(IKCoverRows(CGSizeMake(300,94),38,70,YES).fits, "notification fits both rows");
     check(IKCoverRows(CGSizeMake(358,78),38,76,NO).fits, "one-line lyric fits");
+    CGRect single = IKCoverDisc(CGSizeMake(381,78),125,38), dual = IKCoverDisc(CGSizeMake(381,94),125,38);
+    check(single.size.width == 38 && dual.size.width == 54, "cover grows with the single-to-double-row shell");
+    check(IKTextOrigin(128,40,0) == 0 && IKTextOrigin(128,40,1) == 44 && IKTextOrigin(128,40,2) == 88,
+          "left center and right move the track shared by base and fill");
+    check(IKTextOrigin(100,180,1) == 0 && IKTextOrigin(100,180,2) == 0, "overflow starts at the first glyph for every alignment");
+    for (int step = 0; step <= 60; step++) {
+        CGFloat f = step / 60.0;
+        CGSize shell = CGSizeMake(119 + 262*f, 31 + 63*f);
+        CGRect disc = IKCoverDisc(shell,125,38);
+        check(disc.size.width < 22 || (CGRectGetMaxX(disc) <= (shell.width-125)/2 - 6 && CGRectGetMinY(disc) >= 0),
+              "visible cover stays fully outside the cutout throughout resizing");
+    }
+    InterruptiblePlayer *cold = [InterruptiblePlayer new];
+    NSURL *launchFolder = [folder URLByAppendingPathComponent:@"cold-start"];
+    cold.file = [launchFolder URLByAppendingPathComponent:@"lyrics.plist"];
+    NSURL *status = [launchFolder URLByAppendingPathComponent:IKPlaybackLaunchName];
+    [cold consumeInfo:nil bundle:bid];
+    check([[NSDictionary dictionaryWithContentsOfURL:status][@"phase"] isEqual:@"idle"], "launch without media gives an idle diagnostic");
+    [cold consumeInfo:(id)NSNull.null bundle:bid];
+    check([[NSDictionary dictionaryWithContentsOfURL:status][@"phase"] isEqual:@"invalid-metadata"], "unexpected metadata does not enter the parser");
+    cold.failNextRead = YES;
+    [cold consumeInfo:info bundle:bid];
+    check([[NSDictionary dictionaryWithContentsOfURL:status][@"phase"] isEqual:@"sample-error"], "sample exception stays local to the adapter");
+    [cold consumeInfo:info bundle:bid];
+    check([[NSDictionary dictionaryWithContentsOfURL:status][@"phase"] isEqual:@"sampling"], "valid playback recovers after failed sample");
     TestProxy *proxy = [TestProxy new];
     NSError *error = nil;
     check([IKReadProxyImage(proxy,@selector(read:),&error) isEqual:@"decoded"], "resolved concrete image");

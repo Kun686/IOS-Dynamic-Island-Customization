@@ -125,6 +125,10 @@ static UIColor *IKColorFromHex(NSString *hex, UIColor *fallback) {
     self.spinEnabled    = b(@"spin", YES);
     self.pauseStopsSpin = b(@"pauseStops", YES);
     self.lyricLines     = n(@"lyricLines", 2) >= 2 ? 2 : 1;
+    NSNumber *alignment = d[@"lyricAlignment"];
+    NSInteger value = [alignment isKindOfClass:NSNumber.class] ? alignment.integerValue : 0;
+    self.lyricAlignment = value == 1 || value == 2 ? value : 0;
+    self.defaultCompact = [d[@"defaultMusicView"] isEqual:@1];
     self.spinSeconds    = MAX(1.0, n(@"spinSeconds", 8));
     self.notifDuration  = MAX(1.0, n(@"notifDuration", 5));
     // 岛的位置和大小：plist 里写了就用写的，否则按机型识别

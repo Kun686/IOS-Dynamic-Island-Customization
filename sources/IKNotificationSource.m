@@ -1,4 +1,5 @@
 #import "IKAvatarProxy.h"
+#import "IKLocalAvatar.h"
 #import "IKNotificationSource.h"
 #import "IKController.h"
 #import <objc/runtime.h>
@@ -661,11 +662,21 @@ static UIImage *IKFindImageEnhanced(id obj, NSInteger depth) {
             else if ((avatar = IKFindImageEnhanced(attachments, 0))) avatarFrom = @"additionalAttachments";
             else if ((avatar = IKFindImageEnhanced(IKValue(bulletin, @"userInfo"), 0))) avatarFrom = @"userInfo";
         } @catch (__unused NSException *e) {}
-        NSString *senderID = IKString(sender, @"customIdentifier") ?: IKString(sender, @"handle");
+        NSString *senderID = IKString(sender, @"customIdentifier");
+        if (!senderID.length) senderID = IKString(sender, @"handle");
         NSArray *senderKey = senderID.length ? @[bundleID, senderID] : nil;
+        if (avatar && senderKey && ([avatarFrom isEqual:@"sender"] || [avatarFrom isEqual:@"communicationContext"])) {
+            [IKAvatarCache() setObject:avatar forKey:senderKey cost:avatar.CGImage ?
+                CGImageGetBytesPerRow(avatar.CGImage) * CGImageGetHeight(avatar.CGImage) : 65536];
+        }
         if (!avatar && senderKey) {
             avatar = [IKAvatarCache() objectForKey:senderKey];
             if (avatar) avatarFrom = @"senderCache";
+        }
+        if (!avatar && [bundleID isEqual:@"com.tencent.xin"]) {
+            NSURL *file = [IKLocalAvatar.shared imageForTitle:title.length ? title : subtitle];
+            if (file) avatar = [UIImage imageWithContentsOfFile:file.path];
+            if (avatar) avatarFrom = @"localChoice";
         }
         if (!avatar) {
             UIImage *appIcon = IKApplicationIconFromBundle(sectionBundle, bundleID);
@@ -709,7 +720,8 @@ static UIImage *IKFindImageEnhanced(id obj, NSInteger depth) {
                                                          avatarIsSender:avatarIsSender];
 
         // 微信的 contentURL 是系统代理 URL，头像需要异步从代理解码，避免阻塞 BBObserver 主线程。
-        if (!avatar || [avatarFrom isEqualToString:@"applicationIcon"] || [avatarFrom isEqualToString:@"senderCache"]) {
+        if (!avatar || [avatarFrom isEqualToString:@"applicationIcon"] || [avatarFrom isEqualToString:@"senderCache"] ||
+            [avatarFrom isEqualToString:@"localChoice"]) {
             id contentURL = IKValue(context, @"contentURL");
             NSURL *remoteURL = IKRemoteImageURLFromValue(contentURL, 0);
             if (!remoteURL) remoteURL = IKRemoteImageURLFromValue(context, 0);

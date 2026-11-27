@@ -36,7 +36,7 @@ TrollSpeed_SWIFT_BRIDGING_HEADER += supports/hudapp-bridging-header.h
 
 TrollSpeed_LDFLAGS += -Flibraries
 
-TrollSpeed_FRAMEWORKS += CoreGraphics CoreServices QuartzCore IOKit UIKit
+TrollSpeed_FRAMEWORKS += CoreGraphics CoreServices QuartzCore IOKit UIKit ImageIO
 TrollSpeed_PRIVATE_FRAMEWORKS += BackBoardServices GraphicsServices SpringBoardServices MediaRemote
 TrollSpeed_CODESIGN_FLAGS += -Ssupports/entitlements.plist
 

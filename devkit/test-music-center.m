@@ -2,6 +2,8 @@
 #import "IKPrefs.h"
 #import "MediaRemote.h"
 #import "IKMusicCenter.h"
+#import "IKLocalAvatar.h"
+#import <ImageIO/ImageIO.h>
 
 static NSString *store, *bundle;
 static NSDictionary *metadata;
@@ -130,6 +132,9 @@ int main(int argc, const char **argv) { @autoreleasepool {
     metadata = @{@"Title":@"歌曲", @"Artist":@"歌手", @"Duration":@180, @"ElapsedTime":@42,
                  @"QueueIndex":@1, @"ArtworkData":[@"cover" dataUsingEncoding:NSUTF8StringEncoding]};
     IKMusicCenter *m = IKMusicCenter.shared;
+    NSString *emptyExport = [IKMusicCenter playbackDiagnosticReport];
+    check([emptyExport containsString:@"未读到启动记录"] && [emptyExport containsString:@"悬浮窗尚无可导出"],
+          "empty first launch can export the absence of each source");
     [m refresh];
     UIImage *cover = m.artwork;
     NSString *session = m.recording[@"playSession"];
@@ -233,12 +238,22 @@ int main(int argc, const char **argv) { @autoreleasepool {
     check(m.lyricsBridgeActive && [settingsTarget()[@"mode"] isEqual:@"已绑定本地时间轴"], "replay with different unstable ID finds metadata binding");
     NSString *diagnosticDir = IKPlayerLyricsPath(bundle).stringByDeletingLastPathComponent;
     [NSFileManager.defaultManager createDirectoryAtPath:diagnosticDir withIntermediateDirectories:YES attributes:nil error:nil];
+    NSString *launchFile = [diagnosticDir stringByAppendingPathComponent:IKPlaybackLaunchName];
+    [@{@"bundleID":bundle, @"phase":@"loaded", @"version":@"15.2.3", @"wall":@1000} writeToFile:launchFile atomically:YES];
+    NSString *launchOnly = [IKMusicCenter playbackDiagnosticReport];
+    check([launchOnly containsString:@"等待播放器前台"] && [launchOnly containsString:@"播放器版本=15.2.3"] &&
+          [launchOnly containsString:@"未读到可用的播放器采样"], "early exit report identifies version before first sample");
     NSDictionary *diagnostic = @{@"bundleID":bundle,@"schema":@1,@"fields":@{@"title":@"text"},@"customFields":@{@"vendorLyrics":@"text"},
         @"unknown":@1,@"jumpEvents":@1,@"accessEvents":@2,@"asset":@"remote",@"wall":@1000,@"uptime":@10,
         @"result":@{@"source":@"publishedField",@"key":@"vendorLyrics",@"lines":@3}};
     IKRememberDiagnostic([NSURL fileURLWithPath:diagnosticDir],diagnostic);
     [m clearPlayerScope];
+    NSString *logPath = [store stringByAppendingPathComponent:@"island.log"];
+    NSString *log = @"11-27 21:22:36 recording app=com.tencent.QQMusic externalID=0 persistentID=0 queueIndex=0\n11-27 21:22:44 lyric field=2\n11-27 21:24:37 interaction longPress state=compact\n11-27 21:24:38 lyric field=1 private-text\nprivate-text";
+    [log writeToFile:logPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
     NSString *report = [IKMusicCenter playbackDiagnosticReport];
+    check([report containsString:@"queueIndex=0"] && [report containsString:@"lyric field=2"] &&
+          [report containsString:@"longPress state=compact"] && ![report containsString:@"private-text"], "export recovers only whitelisted historical HUD events");
     check([report containsString:@"1970-"] && [report containsString:@"vendorLyrics/text"] &&
           [report containsString:@"timeline=publishedField key=vendorLyrics lines=3"], "settings exports old host evidence with no active player");
     check([report containsString:@"selected/*.lrc bytes="] && ![report containsString:@"fixture.lrc"] && ![report containsString:@"当前"],
@@ -248,6 +263,18 @@ int main(int argc, const char **argv) { @autoreleasepool {
     testPublishedHandoff(m,@(argv[1]),@"com.tencent.QQMusic",@"qq");
     testPublishedHandoff(m,@(argv[1]),@"com.netease.cloudmusic",@"netease");
     testSampleFolder();
+    IKLocalAvatar *avatars = [[IKLocalAvatar alloc] initWithDirectory:[NSURL fileURLWithPath:[store stringByAppendingPathComponent:@"avatars"]]];
+    NSURL *picture = [NSURL fileURLWithPath:@"Resources/icon.png"];
+    check(![avatars setImage:picture forTitle:@" 测试会话 "], "save chosen image under normalized notification title");
+    NSURL *saved = [avatars imageForTitle:@"测试会话"];
+    check(saved && ![saved.path containsString:@"测试会话"] && ![avatars imageForTitle:@"另一个会话"], "title digest isolates two conversations");
+    CGImageSourceRef icon = CGImageSourceCreateWithURL((__bridge CFURLRef)saved,NULL);
+    NSDictionary *dimensions = CFBridgingRelease(CGImageSourceCopyPropertiesAtIndex(icon,0,NULL));
+    CFRelease(icon);
+    check([dimensions[(__bridge id)kCGImagePropertyPixelWidth] intValue] == 160, "stored picture is a downsampled thumbnail");
+    check([avatars setImage:file forTitle:@"测试会话"] && [avatars imageForTitle:@"测试会话"], "invalid replacement preserves selected photo");
+    check([avatars setImage:picture forTitle:@"微信"] != nil, "generic hidden notification title cannot receive a shared photo");
+    check(![avatars setImage:nil forTitle:@"测试会话"] && ![avatars imageForTitle:@"测试会话"], "removing binding restores automatic fallback");
     if (![NSFileManager.defaultManager removeItemAtPath:store error:nil]) return 2;
     printf("HUD and settings: %d checks passed\n",count);
     return 0;

@@ -98,25 +98,31 @@ struct IslandPreview: View {
                 Capsule().fill(Color.black).frame(width: 126, height: 37)
             case .music:
                 let size = CGFloat(s.lyricFontSize)
+                let compact = s.defaultMusicView == 1 || !s.lyric
+                let two = s.lyricLines >= 2
+                let alignment: HorizontalAlignment = s.lyricAlignment == 2 ? .trailing : (s.lyricAlignment == 1 ? .center : .leading)
                 let titleColor = s.previewColor(mode: s.titleColorMode, custom: s.titleColor)
                 let lyricColor = s.previewColor(mode: s.lyricColorMode, custom: s.lyricColor)
                 HStack(spacing: 12) {
-                    Disc(size: 52, spinning: s.spin, seconds: s.spinSeconds, accent: accent)
-                    VStack(alignment: .leading, spacing: 2) {
-                        if s.lyric && s.lyricLines >= 2 {
-                            Text("歌名 - 歌手").font(.system(size: size, weight: .bold)).foregroundColor(titleColor)
+                    Disc(size: compact ? 27 : (two ? 54 : 38), spinning: s.spin, seconds: s.spinSeconds, accent: accent)
+                    if compact {
+                        Spacer(minLength: 0)
+                        Image(systemName: "waveform").foregroundColor(accent).accessibilityHidden(true)
+                    } else {
+                        VStack(alignment: alignment, spacing: 2) {
+                            if two {
+                                Text("歌名").font(.system(size: size, weight: .bold)).foregroundColor(titleColor)
                                 .lineLimit(1)
-                            LyricSample(color: lyricColor, font: .system(size: max(11, size - 3)), filled: s.lyricEffect == 1)
-                        } else if s.lyric {
-                            LyricSample(color: lyricColor, font: .system(size: size, weight: .bold), filled: s.lyricEffect == 1)
-                        } else {
-                            Text("歌曲名").font(.system(size: 15, weight: .medium)).foregroundColor(.ikText)
+                            }
+                            LyricSample(color: lyricColor, font: .system(size: two ? max(11, size - 3) : size,
+                                                                      weight: two ? .regular : .bold), filled: s.lyricEffect == 1)
                         }
+                        .frame(maxWidth: .infinity, alignment: Alignment(horizontal: alignment, vertical: .center))
                     }
-                    Spacer(minLength: 0)
                 }
                 .padding(.horizontal, 12)
-                .frame(width: 320, height: 76)
+                .frame(maxWidth: compact ? (s.placement == 1 ? 240 : 88) : 320)
+                .frame(height: compact ? 38 : (two ? 76 : 58))
                 .background(Color.black)
                 .clipShape(RoundedRectangle(cornerRadius: 36, style: .continuous))
             case .notif:

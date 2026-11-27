@@ -105,6 +105,7 @@ NSString *const IKSystemIslandDidChangeNotification = @"IKSystemIslandDidChangeN
 @property (nonatomic, strong) UIImage *colorSourceImage; // 已经取过主色的封面
 @property (nonatomic, strong) UIColor *artworkColor;
 @property (nonatomic) IKState shownState;
+@property (nonatomic) BOOL configuredCompact;
 
 // 过渡动画演示：出现 → 停留 → 收起，之后回到正常状态
 @property (nonatomic) BOOL demoActive;
@@ -607,18 +608,19 @@ static const UIViewAnimationOptions IKAnimOptions =
     CGRect tucked = [self tuckedRect];
     IKIslandView *island = self.island;
 
-    if (style == 2 || style == 3) {
+    if (style == 2 || (style == 3 && !island.coversCutout)) {
         // 淡入、缩放弹出：原地出现
         [self snapIsland:^(IKIslandView *v) {
             v.state = target;
             v.frame = frame;
-            v.alpha = 0;
-            v.contentAlpha = 1;
+            v.alpha = v.coversCutout ? 1 : 0;
+            v.contentAlpha = v.coversCutout ? 0 : 1;
         }];
         if (target == IKStateNotif) [island playNotifEntrance];
         if (style == 2) {
             [UIView animateWithDuration:0.3 delay:0 options:IKAnimOptions animations:^{
                 island.alpha = 1;
+                island.contentAlpha = 1;
                 settle();
             } completion:nil];
         } else {
@@ -644,6 +646,7 @@ static const UIViewAnimationOptions IKAnimOptions =
     CGFloat damping = 0.62, velocity = 0.9;
     if (style == 1) { duration = 0.42; damping = 1.0; velocity = 0; }
     if (style == 4) { duration = 0.85; damping = 0.4; velocity = 1.2; }
+    if (style == 3) { duration = 0.5; damping = 0.58; velocity = 0.8; }
     [self resizeTo:target frame:frame duration:duration damping:damping velocity:velocity alongside:settle];
 }
 
@@ -656,10 +659,11 @@ static const UIViewAnimationOptions IKAnimOptions =
     IKIslandView *island = self.island;
     NSUInteger token = ++self.transitionToken;
 
-    if (style == 2 || style == 3) {
-        [island endFollowingShell];
+    if (style == 2 || (style == 3 && !island.coversCutout)) {
+        // A fade can interrupt a resize. Keep following the visible shell until it is hidden.
         [UIView animateWithDuration:duration delay:0 options:IKAnimOptions | UIViewAnimationOptionCurveEaseIn animations:^{
-            island.alpha = 0;
+            if (island.coversCutout) island.contentAlpha = 0;
+            else island.alpha = 0;
             if (style == 3) island.transform = CGAffineTransformMakeScale(0.7, 0.7);
             self.miniHolder.alpha = 0;
         } completion:nil];
@@ -718,6 +722,10 @@ static const UIViewAnimationOptions IKAnimOptions =
     IKMusicCenter *m = [IKMusicCenter shared];
 
     // 系统岛展开时（长按、来电等）让开：那时用户要看、要点的是系统岛
+    if (self.configuredCompact != p.defaultCompact) {
+        self.configuredCompact = p.defaultCompact;
+        self.userCollapsed = p.defaultCompact;
+    }
     BOOL usable = p.enabled && !self.suspended && [self isPortrait] && ![self systemIslandState].expanded;
     BOOL musicOn = usable && (p.lyricEnabled || p.spinEnabled) && m.hasTrack
         && (m.isPlaying || CFAbsoluteTimeGetCurrent() < self.pauseGraceUntil);
@@ -736,6 +744,7 @@ static const UIViewAnimationOptions IKAnimOptions =
     CGRect frame = [self frameForState:target musicOn:musicOn];
     self.island.accent = p.accent;
     self.island.lyricLines = p.lyricLines;
+    self.island.lyricAlignment = p.lyricAlignment;
     self.island.cutoutWidth = p.cutoutWidth;
     self.island.cutoutBand = CGRectGetMaxY([self cutoutRect]) - CGRectGetMinY([self coverBaseRect]);
     self.island.coversCutout = (p.placement != 0);

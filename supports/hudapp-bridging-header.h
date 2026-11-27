@@ -13,6 +13,7 @@
 
 #import "HUDHelper.h"
 #import "../sources/IKMusicCenter.h"
+#import "../sources/IKLocalAvatar.h"
 
 typedef NSString * HUDUserDefaultsKey;
 

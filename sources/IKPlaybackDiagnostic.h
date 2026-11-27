@@ -1,6 +1,7 @@
 #import <Foundation/Foundation.h>
 
 #define IKPlaybackDiagnosticsName @"playback-diagnostics.plist"
+#define IKPlaybackLaunchName @"playback-launch.plist"
 #define IKPlaybackDiagnosticsNotification "com.islandkit.lyrics/diagnostic"
 
 #define IKPlaybackHistoryName @"playback-report.plist"

@@ -191,6 +191,11 @@ struct NotifyView: View {
     @State private var apps: [AppInfo] = []
     @State private var query = ""
     @State private var loading = true
+    @State private var avatarTitle = ""
+    @State private var selectedAvatarTitle = ""
+    @State private var choosingAvatar = false
+    @State private var savingAvatar = false
+    @State private var avatarStatus = ""
 
     private var shown: [AppInfo] {
         query.isEmpty ? apps : apps.filter { $0.name.localizedCaseInsensitiveContains(query) }
@@ -226,6 +231,46 @@ struct NotifyView: View {
                     .font(.system(size: 15))
                     .frame(minHeight: 44)
                 Caption("颜色会即时应用到标题、应用名和通知正文。")
+            }
+
+            Card {
+                DisclosureGroup("微信备用头像") {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Caption("系统没有提供头像时，用通知标题匹配本地图片。同名会话会共用这张头像。")
+                        TextField("微信通知中显示的会话标题", text: $avatarTitle)
+                            .textFieldStyle(.roundedBorder)
+                            .onChange(of: avatarTitle) { _ in avatarStatus = "" }
+                        HStack {
+                            Button("选择图片") {
+                                selectedAvatarTitle = avatarTitle
+                                choosingAvatar = true
+                            }
+                            Spacer()
+                            Button("移除绑定") {
+                                avatarStatus = IKLocalAvatar.shared().setImage(nil, for: avatarTitle) ?? "已移除绑定"
+                            }
+                        }.disabled(avatarTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || savingAvatar)
+                        if !avatarStatus.isEmpty { Caption(avatarStatus) }
+                    }.padding(.top, 8)
+                }
+            }
+            .fileImporter(isPresented: $choosingAvatar, allowedContentTypes: [.image]) { result in
+                do {
+                    let url = try result.get()
+                    let title = selectedAvatarTitle
+                    savingAvatar = true
+                    Task {
+                        let message = await Task.detached {
+                            let scoped = url.startAccessingSecurityScopedResource()
+                            defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+                            return IKLocalAvatar.shared().setImage(url, for: title)
+                        }.value
+                        savingAvatar = false
+                        avatarStatus = message ?? "已为所选会话保存头像"
+                    }
+                } catch {
+                    if (error as NSError).code != NSUserCancelledError { avatarStatus = error.localizedDescription }
+                }
             }
 
             VStack(alignment: .leading, spacing: 8) {
@@ -328,6 +373,10 @@ struct LyricView: View {
 
             Card {
                 SwitchRow(title: "显示歌词", isOn: $store.s.lyric)
+                Caption("默认播放样式")
+                Segmented(value: $store.s.defaultMusicView, options: [(0, "歌词态"), (1, "紧凑态")], accent: accent)
+                    .disabled(!store.s.lyric)
+                Caption("紧凑态只显示封面和音柱。播放时点按或长按屏幕顶部的胶囊可以切换。")
                 Caption("播放器时间轴按播放位置换句。只有蓝牙或车载歌词时，显示播放器上报的当前句。")
             }
 
@@ -341,12 +390,12 @@ struct LyricView: View {
                     .disabled(queryingTrack)
                 Caption(lyricStatus.isEmpty ? "支持带时间标签的 LRC 和明文 QRC、YRC。" : lyricStatus)
                 Button("导出播放诊断") {
-                    let parts = [IKMusicCenter.playbackDiagnosticReport(), sampleReport].compactMap { $0 }
-                    if !parts.isEmpty {
+                    let sample = sampleReport
+                    Task {
+                        let history = await Task.detached { IKMusicCenter.playbackDiagnosticReport() }.value
+                        let parts = [history, sample].compactMap { $0 }
                         reportDocument = PlaybackReportDocument(text: parts.joined(separator: "\n"))
                         exportingReport = true
-                    } else {
-                        lyricStatus = "尚无播放诊断。请先让对应适配器或诊断库运行，再播放要复测的歌曲。"
                     }
                 }
                 .fileExporter(isPresented: $exportingReport, document: reportDocument, contentType: .plainText,
@@ -371,6 +420,8 @@ struct LyricView: View {
                 Caption("行数")
                 Segmented(value: $store.s.lyricLines, options: [(1, "单行"), (2, "双行")], accent: accent)
                 Caption("单行只显示当前这句歌词；双行第一行显示歌名，第二行显示当前歌词。")
+                Caption("文字对齐")
+                Segmented(value: $store.s.lyricAlignment, options: [(0, "靠左"), (1, "居中"), (2, "靠右")], accent: accent)
             }
 
             Card {

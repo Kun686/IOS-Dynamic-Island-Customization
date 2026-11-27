@@ -2,6 +2,52 @@
 #import "IKPlaybackDiagnostic.h"
 #import <MediaPlayer/MediaPlayer.h>
 #import <AVFoundation/AVFoundation.h>
+#if TARGET_OS_IOS
+#import <UIKit/UIKit.h>
+#endif
+
+void IKWhenPlayerIsActive(dispatch_block_t start) {
+#if TARGET_OS_IOS
+    UIApplication *application = UIApplication.sharedApplication;
+    if (!application || application.applicationState != UIApplicationStateActive) {
+        __block id observer = nil;
+        NSNotificationCenter *center = NSNotificationCenter.defaultCenter;
+        observer = [center addObserverForName:UIApplicationDidBecomeActiveNotification object:nil
+            queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) {
+                [NSNotificationCenter.defaultCenter removeObserver:observer];
+                observer = nil;
+                start();
+            }];
+        return;
+    }
+#endif
+    start();
+}
+
+void IKReadPlaybackInfo(dispatch_queue_t receiver, void (^consume)(NSDictionary *, NSString *)) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        NSDictionary *info = nil;
+        NSString *issue = nil;
+        @try {
+            id published = MPNowPlayingInfoCenter.defaultCenter.nowPlayingInfo;
+            if (!published || [published isKindOfClass:NSDictionary.class]) info = [published copy];
+            else issue = @"invalid-metadata";
+        } @catch (__unused NSException *exception) {
+            issue = @"read-error";
+        }
+        dispatch_async(receiver, ^{ consume(info, issue); });
+    });
+}
+
+NSString *IKRecordPlaybackPhase(NSURL *directory, NSString *bundle, NSString *previous, NSString *phase) {
+    if ([previous isEqual:phase] || !bundle.length || !directory) return previous;
+    if (![NSFileManager.defaultManager createDirectoryAtURL:directory withIntermediateDirectories:YES attributes:nil error:nil])
+        return previous;
+    NSDictionary *record = @{@"bundleID":bundle, @"phase":phase, @"wall":@(NSDate.date.timeIntervalSince1970),
+        @"version":IKPlayerVersion(NSBundle.mainBundle.infoDictionary[@"CFBundleShortVersionString"])};
+    NSURL *file = [directory URLByAppendingPathComponent:IKPlaybackLaunchName];
+    return [record writeToURL:file atomically:YES] ? phase : previous;
+}
 
 static NSString *IKValueKind(id value) {
     if ([value isKindOfClass:NSString.class]) return @"text";
@@ -132,24 +178,40 @@ __attribute__((constructor)) static void IKStartPlaybackDiagnostics(void) {
         if (NSClassFromString(@"IKPlayerLyrics")) return; // The full adapter already emits these observations.
         NSURL *library = [NSFileManager.defaultManager URLsForDirectory:NSLibraryDirectory inDomains:NSUserDomainMask].firstObject;
         NSURL *directory = [library URLByAppendingPathComponent:@"IslandKit" isDirectory:YES];
-        dispatch_queue_t queue = dispatch_queue_create("com.islandkit.playback-diagnostics",DISPATCH_QUEUE_SERIAL);
-        __block NSUInteger accessEvents = 0, jumps = 0;
-        for (NSString *name in @[AVPlayerItemNewAccessLogEntryNotification,AVPlayerItemTimeJumpedNotification]) {
-            [NSNotificationCenter.defaultCenter addObserverForName:name object:nil queue:nil usingBlock:^(NSNotification *n) {
-                if (![n.object isKindOfClass:AVPlayerItem.class]) return;
-                dispatch_async(queue, ^{
-                    if ([n.name isEqual:AVPlayerItemTimeJumpedNotification]) jumps++;
-                    else accessEvents++;
+        __block NSString *phase = IKRecordPlaybackPhase(directory, bid, nil, @"loaded");
+        IKWhenPlayerIsActive(^{
+            dispatch_queue_t queue = dispatch_queue_create("com.islandkit.playback-diagnostics",DISPATCH_QUEUE_SERIAL);
+            __block NSUInteger accessEvents = 0, jumps = 0;
+            for (NSString *name in @[AVPlayerItemNewAccessLogEntryNotification,AVPlayerItemTimeJumpedNotification]) {
+                [NSNotificationCenter.defaultCenter addObserverForName:name object:nil queue:nil usingBlock:^(NSNotification *n) {
+                    if (![n.object isKindOfClass:AVPlayerItem.class]) return;
+                    dispatch_async(queue, ^{
+                        if ([n.name isEqual:AVPlayerItemTimeJumpedNotification]) jumps++;
+                        else accessEvents++;
+                    });
+                }];
+            }
+            static dispatch_source_t timer;
+            __block BOOL pending = NO;
+            timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER,0,0,queue);
+            dispatch_source_set_timer(timer,DISPATCH_TIME_NOW,5*NSEC_PER_SEC,NSEC_PER_SEC/4);
+            dispatch_source_set_event_handler(timer, ^{
+                if (pending) return;
+                pending = YES;
+                IKReadPlaybackInfo(queue, ^(NSDictionary *info, NSString *issue) {
+                    pending = NO;
+                    NSString *next = issue;
+                    if (!next) {
+                        @try {
+                            IKWritePlaybackSignals(directory,bid,info,accessEvents,jumps,nil);
+                            next = info.count ? @"sampling" : @"idle";
+                        } @catch (__unused NSException *exception) { next = @"sample-error"; }
+                    }
+                    phase = IKRecordPlaybackPhase(directory, bid, phase, next);
                 });
-            }];
-        }
-        static dispatch_source_t timer;
-        timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER,0,0,queue);
-        dispatch_source_set_timer(timer,DISPATCH_TIME_NOW,5*NSEC_PER_SEC,NSEC_PER_SEC/4);
-        dispatch_source_set_event_handler(timer, ^{
-            @autoreleasepool { IKWritePlaybackSignals(directory,bid,MPNowPlayingInfoCenter.defaultCenter.nowPlayingInfo,accessEvents,jumps,nil); }
+            });
+            dispatch_resume(timer);
         });
-        dispatch_resume(timer);
     });
 }
 #endif
