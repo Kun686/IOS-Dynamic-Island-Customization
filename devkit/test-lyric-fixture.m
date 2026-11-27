@@ -2,6 +2,8 @@
 #import <Foundation/Foundation.h>
 
 static BOOL touched;
+// A directory name the "player" writes into its container, as a constant string of its own image.
+__attribute__((used)) static const char *const FixtureCacheDirectory = "Library/Caches/KaraokeCache";
 BOOL FixtureLyricsTouched(void) { return touched; }
 
 @interface FixtureLateLyricProvider : NSObject {

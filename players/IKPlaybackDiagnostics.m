@@ -91,7 +91,7 @@ NSDictionary *IKPlaybackSignals(NSDictionary *info, NSUInteger accessEvents, NSU
         @"accessEvents":@(MIN(accessEvents,999)), @"jumpEvents":@(MIN(jumpEvents,999))} mutableCopy];
     if (url.isFileURL) {
         NSMutableDictionary *shapes = [NSMutableDictionary dictionary];
-        for (NSString *ext in @[@"lrc",@"qrc",@"yrc"]) {
+        for (NSString *ext in @[@"lrc",@"qrc",@"yrc",@"krc"]) {
             NSURL *sidecar = [url.URLByDeletingPathExtension URLByAppendingPathExtension:ext];
             NSDictionary *shape = IKLyricFileShape(sidecar);
             if (shape) shapes[ext] = shape;

@@ -17,7 +17,7 @@ BOOL IKMetadataSymbol(id key) {
 BOOL IKLyricSymbol(NSString *key) {
     NSString *lower = key.lowercaseString;
     return [lower containsString:@"lyric"] || [lower containsString:@"lrc"] ||
-           [lower containsString:@"qrc"] || [lower containsString:@"yrc"];
+           [lower containsString:@"qrc"] || [lower containsString:@"yrc"] || [lower containsString:@"krc"];
 }
 
 static NSString *IKHeaderKind(NSData *sample) {
@@ -47,7 +47,7 @@ static NSString *IKHeaderKind(NSData *sample) {
 }
 
 static NSArray<NSString *> *IKFileExtensions(void) {
-    return @[@"lrc",@"qrc",@"yrc",@"txt",@"json",@"xml",@"dat",@"bin",@"plist",@"cache",@"other"];
+    return @[@"lrc",@"qrc",@"yrc",@"krc",@"txt",@"json",@"xml",@"dat",@"bin",@"plist",@"cache",@"other"];
 }
 
 NSDictionary *IKLyricShapeAt(int directory, const char *name, NSString *extension) {
@@ -117,7 +117,7 @@ static NSString *IKReportLine(NSDictionary *s, NSString *bundle) {
         [typesUsed addObject:[NSString stringWithFormat:@"%@%@/%@",key,[shape[@"array"] isEqual:@YES] ? @"[]" : @"",shape[@"type"]]];
     }
     [typesUsed sortUsingSelector:@selector(compare:)];
-    for (NSString *ext in @[@"lrc",@"qrc",@"yrc"]) {
+    for (NSString *ext in @[@"lrc",@"qrc",@"yrc",@"krc"]) {
         NSString *file = IKFileShapeSummary(sidecars[ext]);
         if (file) [files addObject:[@"<media>/" stringByAppendingString:file]];
         else if ([s[ext] isEqual:@YES]) [files addObject:ext]; // 0.6.3 snapshot

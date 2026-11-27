@@ -130,7 +130,7 @@ static void IKAppendRun(NSMutableString *out, const unichar *s, NSUInteger i, NS
     }
 }
 
-static NSString *IKRedact(NSString *segment, IKRedactMode mode) {
+static NSString *IKRedact(NSString *segment, IKRedactMode mode, NSSet<NSString *> *fixed, NSMutableArray<NSString *> *masked) {
     if (![segment isKindOfClass:NSString.class] || !segment.length) return @"<empty>";
     NSUInteger n = segment.length;
     if (n > 64) return @"<long>";
@@ -156,14 +156,55 @@ static NSString *IKRedact(NSString *segment, IKRedactMode mode) {
         if (digits == length) [out appendString:@"<num>"];
         else if (hex && length >= 8 && (digits || length >= 16)) [out appendString:@"<hex>"];
         else if (length >= 20 && digits >= 4) [out appendString:@"<id>"];
-        else IKAppendRun(out, s, i, j, mode, keywordStem);
+        else {
+            NSString *run = [NSString stringWithCharacters:s + i length:length];
+            if (mode == IKRedactDirectory && [fixed containsObject:run]) {
+                [out appendString:run];
+            } else {
+                NSUInteger before = out.length;
+                IKAppendRun(out, s, i, j, mode, keywordStem);
+                if (masked && [[out substringFromIndex:before] containsString:@"<word>"]) [masked addObject:run];
+            }
+        }
         i = j;
     }
     return out;
 }
 
-NSString *IKRedactPathSegment(NSString *segment) { return IKRedact(segment, IKRedactDirectory); }
-NSString *IKRedactImageSegment(NSString *segment) { return IKRedact(segment, IKRedactImage); }
+NSString *IKRedactPathSegment(NSString *segment) { return IKRedact(segment, IKRedactDirectory, nil, nil); }
+NSString *IKRedactImageSegment(NSString *segment) { return IKRedact(segment, IKRedactImage, nil, nil); }
+NSString *IKRedactPathSegmentKeeping(NSString *segment, NSSet<NSString *> *fixed) {
+    return IKRedact(segment, IKRedactDirectory, [fixed isKindOfClass:NSSet.class] ? fixed : nil, nil);
+}
+
+NSArray<NSString *> *IKMaskedRuns(NSString *segment) {
+    NSMutableArray<NSString *> *runs = [NSMutableArray array];
+    IKRedact(segment, IKRedactDirectory, nil, runs);
+    return runs;
+}
+
+static BOOL IKNameText(id value) {
+    if (![value isKindOfClass:NSString.class] || ![value length] || [value length] > 64) return NO;
+    BOOL letter = NO;
+    for (NSUInteger i = 0; i < [value length]; i++) {
+        unichar c = [value characterAtIndex:i];
+        if (!IKAlnum(c)) return NO;
+        letter |= !IKDigit(c);
+    }
+    return letter;
+}
+
+NSSet<NSString *> *IKProbeConfirmedNames(NSDictionary *p, NSString *bundle) {
+    NSMutableSet<NSString *> *names = [NSMutableSet set];
+    if (![p isKindOfClass:NSDictionary.class] || ![p[@"schema"] isEqual:@1] || ![bundle isKindOfClass:NSString.class] ||
+        ![p[@"bundleID"] isKindOfClass:NSString.class] || [p[@"bundleID"] caseInsensitiveCompare:bundle] != NSOrderedSame ||
+        ![p[@"names"] isKindOfClass:NSArray.class]) return names;
+    for (id name in p[@"names"]) {
+        if (names.count >= 2000) break;
+        if (IKNameText(name)) [names addObject:name];
+    }
+    return names;
+}
 
 NSString *IKRedactFileName(NSString *name, NSString **extension) {
     if (extension) *extension = @"";
@@ -175,11 +216,11 @@ NSString *IKRedactFileName(NSString *name, NSString **extension) {
         NSCharacterSet *allowed = [NSCharacterSet characterSetWithCharactersInString:
             @"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"];
         if ([tail rangeOfCharacterFromSet:allowed.invertedSet].location == NSNotFound) {
-            ext = IKRedact(tail.lowercaseString, IKRedactExtension);
+            ext = IKRedact(tail.lowercaseString, IKRedactExtension, nil, nil);
             stem = [name substringToIndex:dot.location];
         }
     }
-    NSString *shown = IKRedact(stem, IKRedactStem);
+    NSString *shown = IKRedact(stem, IKRedactStem, nil, nil);
     if (extension) *extension = ext;
     return ext.length ? [NSString stringWithFormat:@"%@.%@", shown, ext] : shown;
 }
@@ -190,7 +231,7 @@ static BOOL IKImagePathText(id value) {
     NSArray<NSString *> *parts = [value componentsSeparatedByString:@"/"];
     if (parts.count > 8) return NO;
     for (NSString *part in parts)
-        if (!part.length || ![IKRedact(part, IKRedactImage) isEqual:part]) return NO;
+        if (!part.length || ![IKRedact(part, IKRedactImage, nil, nil) isEqual:part]) return NO;
     return YES;
 }
 
@@ -336,8 +377,10 @@ NSString *IKClassInventoryReport(NSDictionary *p, NSString *bundle) {
 
 NSString *IKProbeGuardReport(NSDictionary *marker, NSString *bundle) {
     if (![marker isKindOfClass:NSDictionary.class] || ![bundle isKindOfClass:NSString.class] ||
-        ![marker[@"attempts"] isKindOfClass:NSDictionary.class]) return nil;
-    NSDictionary *counts = marker[@"attempts"];
+        (![marker[@"attempts"] isKindOfClass:NSDictionary.class] && ![marker[@"attempts"] isKindOfClass:NSNumber.class])) return nil;
+    id raw = marker[@"attempts"];
+    // The first format kept one count for both triggers; the probe applies it to both.
+    NSDictionary *counts = [raw isKindOfClass:NSNumber.class] ? @{@"launch": raw, @"playback": raw} : raw;
     NSMutableArray<NSString *> *parts = [NSMutableArray array], *stopped = [NSMutableArray array];
     for (NSString *trigger in @[@"launch", @"playback"]) {
         NSUInteger attempts = IKCount(counts[trigger], 99);
@@ -462,30 +505,69 @@ static BOOL IKSameState(NSArray<NSNumber *> *p, NSArray<NSNumber *> *h, BOOL pos
     return YES;
 }
 
-// Pairs each HUD change with the one player call in the ten seconds before it that left the same state.
-// Several equal candidates cannot be told apart and are counted as ambiguous instead of guessed.
-// Pairs keep their order: a later HUD change never pairs with a player call before the previous pair.
-static NSArray<NSNumber *> *IKPairEvents(NSArray<NSArray<NSNumber *> *> *sent, NSArray<NSArray<NSNumber *> *> *seen, BOOL position,
-                                         NSUInteger *ambiguous, NSUInteger *unmatched) {
+typedef struct {
+    NSUInteger positionMatched;  // both sides recorded the same position
+    NSUInteger positionMissing;  // at least one side recorded no position
+    NSUInteger positionIgnored;  // found only after ignoring a position that differed
+    NSUInteger ambiguous, unmatched;
+} IKPairCounts;
+
+// Whether player call k can be the state the HUD saw with change mask `mask`. With a known `base` (the call the
+// HUD's previous observation showed), the fields changed by calls base+1...k together must be exactly the fields
+// the HUD saw change. Without a base, call k's own changes must be among them. The probe's first call has no real mask.
+static BOOL IKMaskFits(NSArray<NSArray<NSNumber *> *> *sent, NSUInteger base, NSUInteger k, NSUInteger mask) {
+    if (sent[k][8].unsignedIntegerValue & 1) return YES;
+    if (base == NSNotFound || base >= k) return (sent[k][4].unsignedIntegerValue & ~mask) == 0;
+    NSUInteger changed = 0;
+    for (NSUInteger i = base + 1; i <= k; i++) changed |= sent[i][4].unsignedIntegerValue;
+    return changed == mask;
+}
+
+// Pairs each HUD change with the one player call in the ten seconds before it that left the same state and
+// changed the same fields. Several candidates cannot be told apart and are counted as ambiguous instead of
+// guessed. Pairs keep their order: a later HUD change never pairs with a player call before the previous pair.
+// Each change is tried with positions first and, only when that finds nothing, once more without them.
+static NSArray<NSNumber *> *IKPairEvents(NSArray<NSArray<NSNumber *> *> *sent, NSArray<NSArray<NSNumber *> *> *seen, IKPairCounts *counts) {
     NSMutableArray<NSNumber *> *deltas = [NSMutableArray array];
-    *ambiguous = *unmatched = 0;
-    NSUInteger floor = 0;
+    *counts = (IKPairCounts){0};
+    NSUInteger floor = 0, base = NSNotFound;
     for (NSArray<NSNumber *> *h in seen) {
-        if (h[8].unsignedIntegerValue & 1) continue;  // the HUD's first observation is not a change it received
         double at = h[0].doubleValue;
+        if (h[8].unsignedIntegerValue & 1) {
+            // The HUD's first observation is no delivery to time, but it shows a known state: one of the last two
+            // player calls before it. It anchors the masks of the changes that follow.
+            base = NSNotFound;
+            NSUInteger tried = 0;
+            for (NSUInteger k = sent.count; k-- > 0 && tried < 2;) {
+                if (sent[k][0].doubleValue > at) continue;
+                tried++;
+                if (IKSameState(sent[k], h, YES)) { base = k; break; }
+            }
+            if (base != NSNotFound) floor = MAX(floor, base + 1);
+            continue;
+        }
         NSUInteger found = NSNotFound, candidates = 0;
-        for (NSUInteger k = floor; k < sent.count && sent[k][0].doubleValue <= at; k++) {
-            if (sent[k][0].doubleValue < at - 10 || !IKSameState(sent[k], h, position)) continue;
-            candidates++;
-            found = k;
+        BOOL withPosition = YES;
+        for (int pass = 0; pass < 2 && !candidates; pass++) {
+            withPosition = pass == 0;
+            for (NSUInteger k = floor; k < sent.count && sent[k][0].doubleValue <= at; k++) {
+                if (sent[k][0].doubleValue < at - 10 || !IKSameState(sent[k], h, withPosition) || !IKMaskFits(sent, base, k, h[4].unsignedIntegerValue)) continue;
+                candidates++;
+                found = k;
+            }
         }
         if (candidates == 1) {
             [deltas addObject:@(at - sent[found][0].doubleValue)];
+            BOOL bothPositions = sent[found][1].doubleValue >= 0 && h[1].doubleValue >= 0;
+            if (!withPosition) counts->positionIgnored++;
+            else if (bothPositions) counts->positionMatched++;
+            else counts->positionMissing++;
             floor = found + 1;
-        } else if (candidates) {
-            (*ambiguous)++;
+            base = found;
         } else {
-            (*unmatched)++;
+            if (candidates) counts->ambiguous++;
+            else counts->unmatched++;
+            base = NSNotFound;
         }
     }
     return deltas;
@@ -518,25 +600,20 @@ NSString *IKLyricEventsReport(NSDictionary *player, NSDictionary *hud, NSString 
         [lines addObject:[NSString stringWithFormat:@"lyric latency app=%@ paired=0 reason=%@", bundle, reason]];
         return [lines componentsJoinedByString:@"\n"];
     }
-    NSUInteger ambiguous = 0, unmatched = 0;
-    NSArray<NSNumber *> *deltas = IKPairEvents(sent, seen, YES, &ambiguous, &unmatched);
-    NSString *match = @"state+position";
-    if (!deltas.count) {
-        // In case the system rewrites the published position, try once more without it. Equal candidates still do not pair.
-        NSUInteger looseAmbiguous = 0, looseUnmatched = 0;
-        NSArray *loose = IKPairEvents(sent, seen, NO, &looseAmbiguous, &looseUnmatched);
-        if (loose.count) { deltas = loose; ambiguous = looseAmbiguous; unmatched = looseUnmatched; match = @"state"; }
-    }
+    IKPairCounts counts;
+    NSArray<NSNumber *> *deltas = IKPairEvents(sent, seen, &counts);
     if (!deltas.count) {
         [lines addObject:[NSString stringWithFormat:@"lyric latency app=%@ paired=0 ambiguous=%lu unmatched=%lu reason=%@", bundle,
-            (unsigned long)ambiguous, (unsigned long)unmatched, ambiguous ? @"ambiguous" : @"no-overlap"]];
+            (unsigned long)counts.ambiguous, (unsigned long)counts.unmatched, counts.ambiguous ? @"ambiguous" : @"no-overlap"]];
         return [lines componentsJoinedByString:@"\n"];
     }
     deltas = [deltas sortedArrayUsingSelector:@selector(compare:)];
     NSUInteger n = deltas.count;
     [lines addObject:[NSString stringWithFormat:
-        @"lyric latency app=%@ paired=%lu ambiguous=%lu unmatched=%lu player=%lu hud=%lu match=%@ min=%.3f median=%.3f p90=%.3f max=%.3f (seconds, HUD seen minus player set)",
-        bundle, (unsigned long)n, (unsigned long)ambiguous, (unsigned long)unmatched, (unsigned long)sent.count, (unsigned long)seen.count, match,
+        @"lyric latency app=%@ paired=%lu positionMatched=%lu positionMissing=%lu positionIgnored=%lu ambiguous=%lu unmatched=%lu player=%lu hud=%lu "
+         "min=%.3f median=%.3f p90=%.3f max=%.3f (seconds, HUD seen minus player set)",
+        bundle, (unsigned long)n, (unsigned long)counts.positionMatched, (unsigned long)counts.positionMissing, (unsigned long)counts.positionIgnored,
+        (unsigned long)counts.ambiguous, (unsigned long)counts.unmatched, (unsigned long)sent.count, (unsigned long)seen.count,
         deltas[0].doubleValue, deltas[n / 2].doubleValue, deltas[MIN(n - 1, (n * 9) / 10)].doubleValue, deltas[n - 1].doubleValue]];
     return [lines componentsJoinedByString:@"\n"];
 }

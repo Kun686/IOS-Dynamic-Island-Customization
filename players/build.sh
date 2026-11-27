@@ -23,4 +23,5 @@ for name in QQMusic NetEase; do
         "$root/players/IKPlayerLyrics.m" "$root/sources/IKLyricsTimeline.m"
 done
 # The diagnostics library also carries the lyric data probe. The two adapters do not.
-build_player IslandKit-PlaybackDiagnostics -DIK_DIAGNOSTICS_ONLY=1 "$root/players/IKLyricProbe.m" "$root/sources/IKLyricEvidence.m"
+build_player IslandKit-PlaybackDiagnostics -DIK_DIAGNOSTICS_ONLY=1 "$root/players/IKLyricProbe.m" "$root/sources/IKLyricEvidence.m" \
+    "$root/sources/IKContainerScan.m"

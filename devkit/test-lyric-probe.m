@@ -123,6 +123,19 @@ static void testRedaction(void) {
         check([shown isEqual:segments[segment]], "path segment redaction");
     }
     check([IKRedactPathSegment([@"" stringByPaddingToLength:65 withString:@"a" startingAtIndex:0]) isEqual:@"<long>"], "very long segment");
+    NSSet *fixed = [NSSet setWithObjects:@"KaraokeCache", @"deadbeef1", @"2024", nil];
+    check([IKRedactPathSegmentKeeping(@"KaraokeCache", fixed) isEqual:@"KaraokeCache"] && [IKRedactPathSegment(@"KaraokeCache") isEqual:@"<word>Cache"] &&
+          [IKRedactPathSegmentKeeping(@"QQJohnCache", fixed) isEqual:@"QQ<word>Cache"] && [IKRedactPathSegmentKeeping(@"deadbeef1", fixed) isEqual:@"<hex>"] &&
+          [IKRedactPathSegmentKeeping(@"2024", fixed) isEqual:@"<num>"] && [IKRedactPathSegmentKeeping(@"KaraokeCache", nil) isEqual:@"<word>Cache"],
+          "a confirmed name is kept, numbers and IDs never are");
+    check([IKMaskedRuns(@"KaraokeCache") isEqual:@[@"KaraokeCache"]] && [IKMaskedRuns(@"com.example.johnsmith") isEqual:@[@"example", @"johnsmith"]] &&
+          [IKMaskedRuns(@"LyricCache") isEqual:@[]] && [IKMaskedRuns(@"1234") isEqual:@[]] && [IKMaskedRuns(@"周杰伦") isEqual:@[]] &&
+          [IKMaskedRuns(@"john@example.com") isEqual:@[]] && [IKMaskedRuns(@"QQJohnCache_v2") isEqual:@[@"QQJohnCache"]], "the runs that would be hidden");
+    NSDictionary *names = @{@"schema": @1, @"bundleID": @"com.tencent.QQMusic",
+                            @"names": @[@"KaraokeCache", @"bad name", @"歌词", @"12345", @7, @"", @"x/y"]};
+    check([IKProbeConfirmedNames(names, @"com.tencent.qqmusic") isEqual:[NSSet setWithObject:@"KaraokeCache"]] &&
+          !IKProbeConfirmedNames(names, @"com.netease.cloudmusic").count && !IKProbeConfirmedNames(@{@"schema": @2, @"names": @[@"A"]}, @"x").count &&
+          !IKProbeConfirmedNames(nil, @"com.tencent.QQMusic").count, "names read back are letters and digits for this app only");
     check([IKRedactPathSegment((id)@5) isEqual:@"<empty>"], "non-string segment");
     NSArray *files = @[@[@"123456.qrc", @"<num>.qrc", @"qrc"], @[@"晴天-周杰伦.lrc", @"<text>.lrc", @"lrc"],
                        @[@"Shape of You.lrc", @"<text>.lrc", @"lrc"], @[@"lyric_cache.db", @"lyric_cache.db", @"db"],
@@ -270,7 +283,9 @@ static void testClasses(NSString *bundlePath) {
           !IKClassInventoryReport(@{@"schema": @2, @"bundleID": @"com.tencent.QQMusic"}, @"com.tencent.QQMusic"), "wrong app or schema is refused");
     check([IKProbeGuardReport(@{@"version": @"13.5.0", @"attempts": @{@"launch": @1, @"playback": @2}}, @"com.tencent.QQMusic")
               containsString:@"version=13.5.0 class sampling unfinished launch=1 playback=2 (playback sampling stopped for this version)"] &&
-          !IKProbeGuardReport(@{@"attempts": @2}, @"com.tencent.QQMusic") && !IKProbeGuardReport(@{@"attempts": @{}}, @"com.tencent.QQMusic") &&
+          [IKProbeGuardReport(@{@"attempts": @2}, @"com.tencent.QQMusic")
+              containsString:@"unfinished launch=2 playback=2 (launch+playback sampling stopped for this version)"] &&
+          !IKProbeGuardReport(@{@"attempts": @{}}, @"com.tencent.QQMusic") && !IKProbeGuardReport(@{@"attempts": @"2"}, @"com.tencent.QQMusic") &&
           !IKProbeGuardReport(@{}, @"com.tencent.QQMusic") && !IKProbeGuardReport(nil, @"com.tencent.QQMusic"), "unfinished sampling is reported per trigger");
 }
 
@@ -315,8 +330,9 @@ static void testEvents(NSURL *folder) {
           [report containsString:@"\n  t=118.000 pos=- rate=- dur=200.0 changed=title+artist len=3+3\n"] &&
           [report containsString:@"\n  t=130.000 pos=0.00 rate=1.00 dur=251.0 changed=title+artist len=3+3 newDuration"], "player lines");
     check([report containsString:@"side=hud captured="] && [report containsString:@"\n  t=112.520 pos=12.50"], "HUD lines");
-    check([report containsString:@"lyric latency app=com.netease.cloudmusic paired=3 ambiguous=0 unmatched=0 player=4 hud=4 match=state+position "
-                                  "min=0.020 median=0.040 p90=0.300 max=0.300"], "latency pairs each HUD change with the player's");
+    check([report containsString:@"lyric latency app=com.netease.cloudmusic paired=3 positionMatched=2 positionMissing=1 positionIgnored=0 "
+                                  "ambiguous=0 unmatched=0 player=4 hud=4 min=0.020 median=0.040 p90=0.300 max=0.300"],
+          "latency pairs each HUD change with the player's");
 
     // #117: two lines of equal length 4 s apart. The HUD missed the first and got the second 30 ms late.
     NSDictionary *(^pair)(BOOL, BOOL) = ^NSDictionary *(BOOL playerPositions, BOOL hudPositions) {
@@ -332,7 +348,8 @@ static void testEvents(NSURL *folder) {
     };
     NSDictionary *logs = pair(YES, YES);
     report = IKLyricEventsReport(logs[@"player"], logs[@"hud"], @"com.netease.cloudmusic");
-    check([report containsString:@"paired=1 ambiguous=0 unmatched=0 player=3 hud=2 match=state+position min=0.030 median=0.030"],
+    check([report containsString:@"paired=1 positionMatched=1 positionMissing=0 positionIgnored=0 ambiguous=0 unmatched=0 player=3 hud=2 "
+                                  "min=0.030 median=0.030"],
           "the position tells two equal-length lines apart");
     logs = pair(NO, NO);
     report = IKLyricEventsReport(logs[@"player"], logs[@"hud"], @"com.netease.cloudmusic");
@@ -351,8 +368,58 @@ static void testEvents(NSURL *folder) {
     [receiver observeTitle:@"歌名" artist:@"短句" album:nil duration:@200 elapsed:@10.5 rate:@1 uptime:200.05];
     [receiver observeTitle:@"歌名" artist:@"长一些的一句" album:nil duration:@200 elapsed:@14.5 rate:@1 uptime:204.08];
     report = IKLyricEventsReport([sender snapshotAtUptime:210 wall:1795780210], [receiver snapshotAtUptime:210 wall:1795780210], @"com.netease.cloudmusic");
-    check([report containsString:@"paired=2 ambiguous=0 unmatched=0 player=2 hud=3 match=state min=0.050 median=0.080 p90=0.080 max=0.080"],
-          "positions that never agree fall back to the other fields");
+    check([report containsString:@"paired=2 positionMatched=0 positionMissing=0 positionIgnored=2 ambiguous=0 unmatched=0 player=2 hud=3 "
+                                  "min=0.050 median=0.080 p90=0.080 max=0.080"], "positions that never agree fall back to the other fields");
+
+    // #137: only one change had its position rewritten. It falls back on its own; the others keep their positions.
+    sender = [[IKLyricEventLog alloc] initWithBundle:@"com.netease.cloudmusic" side:@"player"];
+    receiver = [[IKLyricEventLog alloc] initWithBundle:@"com.netease.cloudmusic" side:@"hud"];
+    [sender observeTitle:@"歌名" artist:@"短句" album:nil duration:@200 elapsed:@10 rate:@1 uptime:200];
+    [sender observeTitle:@"歌名" artist:@"长一些的一句" album:nil duration:@200 elapsed:@14 rate:@1 uptime:204];
+    [sender observeTitle:@"歌名" artist:@"又一句" album:nil duration:@200 elapsed:@18 rate:@1 uptime:208];
+    [receiver observeTitle:@"歌名" artist:@"歌手" album:nil duration:@200 elapsed:@0 rate:@1 uptime:190];
+    [receiver observeTitle:@"歌名" artist:@"短句" album:nil duration:@200 elapsed:@10 rate:@1 uptime:200.05];
+    [receiver observeTitle:@"歌名" artist:@"长一些的一句" album:nil duration:@200 elapsed:@14.5 rate:@1 uptime:204.08];
+    [receiver observeTitle:@"歌名" artist:@"又一句" album:nil duration:@200 elapsed:@18 rate:@1 uptime:208.02];
+    report = IKLyricEventsReport([sender snapshotAtUptime:210 wall:1795780210], [receiver snapshotAtUptime:210 wall:1795780210], @"com.netease.cloudmusic");
+    check([report containsString:@"paired=3 positionMatched=2 positionMissing=0 positionIgnored=1 ambiguous=0 unmatched=0 player=3 hud=4 "
+                                  "min=0.020 median=0.050 p90=0.080 max=0.080"], "a rewritten position falls back for that change alone");
+
+    // #137: equal lengths after both calls, but they changed different fields. The HUD's own mask decides.
+    NSDictionary *(^masks)(BOOL) = ^NSDictionary *(BOOL sameField) {
+        IKLyricEventLog *a = [[IKLyricEventLog alloc] initWithBundle:@"com.netease.cloudmusic" side:@"player"];
+        IKLyricEventLog *b = [[IKLyricEventLog alloc] initWithBundle:@"com.netease.cloudmusic" side:@"hud"];
+        [a observeTitle:@"甲甲甲" artist:@"乙乙" album:nil duration:@200 elapsed:nil rate:nil uptime:100];
+        [a observeTitle:@"甲甲甲" artist:@"戊戊戊戊" album:nil duration:@200 elapsed:nil rate:nil uptime:103];
+        [a observeTitle:@"丙丙丙" artist:@"戊戊戊戊" album:nil duration:@200 elapsed:nil rate:nil uptime:110];
+        if (sameField) [a observeTitle:@"丁丁丁" artist:@"戊戊戊戊" album:nil duration:@200 elapsed:nil rate:nil uptime:110.2];
+        else [a observeTitle:@"丙丙丙" artist:@"丁丁丁丁" album:nil duration:@200 elapsed:nil rate:nil uptime:110.2];
+        [b observeTitle:@"甲甲甲" artist:@"乙乙" album:nil duration:@200 elapsed:nil rate:nil uptime:100.5];
+        [b observeTitle:@"甲甲甲" artist:@"戊戊戊戊" album:nil duration:@200 elapsed:nil rate:nil uptime:103.05];
+        if (sameField) [b observeTitle:@"丁丁丁" artist:@"戊戊戊戊" album:nil duration:@200 elapsed:nil rate:nil uptime:110.3];
+        else [b observeTitle:@"丙丙丙" artist:@"丁丁丁丁" album:nil duration:@200 elapsed:nil rate:nil uptime:110.3];
+        return @{@"player": [a snapshotAtUptime:120 wall:1795780120], @"hud": [b snapshotAtUptime:120 wall:1795780120]};
+    };
+    logs = masks(NO);
+    report = IKLyricEventsReport(logs[@"player"], logs[@"hud"], @"com.netease.cloudmusic");
+    check([report containsString:@"paired=2 positionMatched=0 positionMissing=2 positionIgnored=0 ambiguous=0 unmatched=0 player=4 hud=3 "
+                                  "min=0.050 median=0.100"], "the fields that changed since the last pair pick the call");
+    logs = masks(YES);
+    report = IKLyricEventsReport(logs[@"player"], logs[@"hud"], @"com.netease.cloudmusic");
+    check([report containsString:@"paired=1 positionMatched=0 positionMissing=1 positionIgnored=0 ambiguous=1 unmatched=0"],
+          "the same field changed twice with the same length stays ambiguous");
+
+    // The HUD's first observation anchors the masks even before any pair.
+    sender = [[IKLyricEventLog alloc] initWithBundle:@"com.netease.cloudmusic" side:@"player"];
+    receiver = [[IKLyricEventLog alloc] initWithBundle:@"com.netease.cloudmusic" side:@"hud"];
+    [sender observeTitle:@"甲甲甲" artist:@"乙乙" album:nil duration:@200 elapsed:nil rate:nil uptime:100];
+    [sender observeTitle:@"丙丙丙" artist:@"乙乙" album:nil duration:@200 elapsed:nil rate:nil uptime:110];
+    [sender observeTitle:@"丙丙丙" artist:@"丁丁" album:nil duration:@200 elapsed:nil rate:nil uptime:110.2];
+    [receiver observeTitle:@"甲甲甲" artist:@"乙乙" album:nil duration:@200 elapsed:nil rate:nil uptime:100.5];
+    [receiver observeTitle:@"丙丙丙" artist:@"丁丁" album:nil duration:@200 elapsed:nil rate:nil uptime:110.25];
+    report = IKLyricEventsReport([sender snapshotAtUptime:120 wall:1795780120], [receiver snapshotAtUptime:120 wall:1795780120], @"com.netease.cloudmusic");
+    check([report containsString:@"paired=1 positionMatched=0 positionMissing=1 positionIgnored=0 ambiguous=0 unmatched=0 player=3 hud=2 min=0.050"],
+          "two calls merged into one HUD change pair with the later call");
     for (NSString *text in @[@"歌名", @"第一句", @"第二句", @"下一首"]) check(![report containsString:text], "event report holds no text");
     check([IKLyricEventsReport(snapshot, nil, @"com.netease.cloudmusic") containsString:@"side=hud absent"] &&
           [IKLyricEventsReport(snapshot, nil, @"com.netease.cloudmusic") containsString:@"paired=0 reason=no-hud-events"], "HUD not running");
@@ -470,7 +537,7 @@ static void testContainer(NSURL *folder) {
         check([report containsString:row], "container rows: fixed names kept, account-like parts replaced");
     }
     check([report containsString:@"header=timed-text"] && [report hasPrefix:@"container scan app=com.tencent.QQMusic directories="] &&
-          [report containsString:@"matched=17 rows=19 unlisted=0 symlinks=2 unreadable=0 tooDeep=0 complete=1 limited=none"], "container summary");
+          [report containsString:@"matched=17 rows=19 unlisted=0 symlinks=2 unreadable=0 tooDeep=0 confirmedNames=0 complete=1 limited=none"], "container summary");
     for (NSString *secret in @[@"123456789", @"987654321", @"晴天", @"周杰伦", @"私有歌词", @"abcdef0123", @"1234567", @"IslandKit", @"QRCode",
                                @"Hello", @"Yesterday", @"Imagine", @"Halo", @"Faded", @"Believer", @"index", @"deep", @"Yellow", @"single",
                                @"john", @"smith", @"example", @"6F9619FF", root.path, @"Preferences", @"linked", @"1.png"])
@@ -517,10 +584,50 @@ static void testContainer(NSURL *folder) {
     check([report containsString:@"Documents/Lyric/<num>.qrc ext=qrc files=14 bytes=5..8 header=binary sampled=8"], "at most eight headers per row");
     check(!IKContainerScanReport([root URLByAppendingPathComponent:@"missing"], @"com.tencent.QQMusic", IKDefaultScanLimits()) &&
           !IKContainerScanReport([NSURL URLWithString:@"https://example.com/"], @"com.tencent.QQMusic", IKDefaultScanLimits()), "missing container");
+    NSURL *locked = [folder URLByAppendingPathComponent:@"Data/Application/locked" isDirectory:YES];
+    put(locked, @"Documents/Lyric/a.lrc", timed);
+    put(locked, @"Documents/Lyric/b.lrc", timed);
+    chmod([locked URLByAppendingPathComponent:@"Documents/Lyric/a.lrc"].fileSystemRepresentation, 0);
+    report = IKContainerScanReport(locked, @"com.tencent.QQMusic", IKDefaultScanLimits());
+    check([report containsString:@"unreadable=1 "] && [report containsString:@"complete=0 limited=none"] &&
+          [report containsString:@"Documents/Lyric/b.lrc ext=lrc files=1"] && ![report containsString:@"a.lrc"],
+          "a file that cannot be read makes the scan incomplete");
+
+    NSURL *named = [folder URLByAppendingPathComponent:@"Data/Application/named" isDirectory:YES];
+    put(named, @"Library/Caches/KaraokeCache/lyric/9.lrc", timed);
+    put(named, @"Documents/johnsmith/lyric/1.lrc", timed);
+    put(named, @"Library/IslandKit/x.plist", plain);
+    [fm createSymbolicLinkAtURL:[named URLByAppendingPathComponent:@"tmp/LinkedDir"] withDestinationURL:[named URLByAppendingPathComponent:@"Documents"] error:nil];
+    report = IKContainerScanReport(named, @"com.tencent.QQMusic", IKDefaultScanLimits());
+    check([report containsString:@"\n  Library/Caches/<word>Cache/lyric/<num>.lrc"] && [report containsString:@"confirmedNames=0"],
+          "an unknown word stays hidden without confirmation");
+    report = IKContainerScanReportKeeping(named, @"com.tencent.QQMusic", IKDefaultScanLimits(), [NSSet setWithObject:@"KaraokeCache"]);
+    check([report containsString:@"\n  Library/Caches/KaraokeCache/lyric/<num>.lrc"] && [report containsString:@"\n  Documents/<word>/lyric/<num>.lrc"] &&
+          [report containsString:@"confirmedNames=1 "] && ![report containsString:@"johnsmith"], "a name confirmed in the player's binary is shown");
+    NSArray *directoryNames = IKContainerDirectoryNames(named, IKDefaultScanLimits());
+    check([directoryNames containsObject:@"KaraokeCache"] && [directoryNames containsObject:@"johnsmith"] && [directoryNames containsObject:@"Caches"] &&
+          ![directoryNames containsObject:@"IslandKit"] && ![directoryNames containsObject:@"LinkedDir"], "directory names for the probe");
+    IKScanLimits shallow = IKDefaultScanLimits();
+    shallow.depth = 1;  // only Documents, Library and tmp are read; the names in them are seen, nothing below
+    check(![IKContainerDirectoryNames(named, shallow) containsObject:@"KaraokeCache"] && [IKContainerDirectoryNames(named, shallow) containsObject:@"Caches"],
+          "the walker keeps the depth limit");
+
     NSURL *empty = [folder URLByAppendingPathComponent:@"Data/Application/empty" isDirectory:YES];
     [fm createDirectoryAtURL:empty withIntermediateDirectories:YES attributes:nil error:nil];
     check([IKContainerScanReport(empty, @"com.netease.cloudmusic", IKDefaultScanLimits()) containsString:@"directories=0 entries=0 matched=0 rows=0"],
           "a container without the three folders");
+}
+
+static NSDictionary *playCall(NSString *title, NSNumber *rate, NSNumber *elapsed, double uptime) {
+    NSMutableDictionary *call = [NSMutableDictionary dictionaryWithObject:@(uptime) forKey:@"uptime"];
+    if (title) call[@"title"] = title;
+    if (rate) call[@"rate"] = rate;
+    if (elapsed) call[@"elapsed"] = elapsed;
+    return call;
+}
+
+static NSString *executableOf(NSString *bundlePath) {
+    return [bundlePath stringByAppendingPathComponent:@"test-lyric-probe"];
 }
 
 static BOOL waitFor(BOOL (^done)(void)) {
@@ -553,16 +660,45 @@ static void testProbe(NSURL *folder, NSString *bundlePath) {
     check(![NSFileManager.defaultManager fileExistsAtPath:guard.path], "finished sampling clears the mark");
     check(!IKProbeBeginSampling(directory, @"1.0", @"other", NULL) && ![NSFileManager.defaultManager fileExistsAtPath:guard.path], "unknown trigger");
 
-    NSDictionary *paused = @{@"title": @"x", @"elapsed": @10, @"uptime": @100};
-    check(!IKProbePlaybackStarted(nil, paused), "a title alone is not playback");
-    check(!IKProbePlaybackStarted(paused, @{@"title": @"x", @"elapsed": @10, @"uptime": @103}), "a position that stays put is paused");
-    check(IKProbePlaybackStarted(paused, @{@"title": @"x", @"elapsed": @12, @"uptime": @102}), "a position that moves with the clock is playback");
-    check(!IKProbePlaybackStarted(paused, @{@"title": @"y", @"elapsed": @12, @"uptime": @102}), "another title is a new track, not progress");
-    check(!IKProbePlaybackStarted(paused, @{@"title": @"x", @"elapsed": @90, @"uptime": @102}), "a seek is not progress");
-    check(!IKProbePlaybackStarted(paused, @{@"title": @"x", @"elapsed": @12, @"uptime": @100}), "no time passed");
-    check(IKProbePlaybackStarted(nil, @{@"title": @"x", @"rate": @1, @"uptime": @1}), "a positive rate is playback");
-    check(!IKProbePlaybackStarted(paused, @{@"title": @"x", @"rate": @0, @"elapsed": @12, @"uptime": @102}), "a zero rate wins over a moving position");
-    check(!IKProbePlaybackStarted(nil, @{@"rate": @1, @"uptime": @1}), "no title, no playback");
+    check(!IKProbePlaybackStarted(@[playCall(@"x", nil, @10, 100)]), "a title alone is not playback");
+    check(!IKProbePlaybackStarted(@[playCall(@"x", nil, @10, 100), playCall(@"x", nil, @10.5, 105)]), "#137: a small seek while paused");
+    check(!IKProbePlaybackStarted(@[playCall(@"x", nil, @10, 100), playCall(@"x", nil, @10.5, 100.5)]), "one interval is not enough, even at clock speed");
+    check(!IKProbePlaybackStarted(@[playCall(@"x", nil, @10, 100), playCall(@"x", nil, @10, 103), playCall(@"x", nil, @10.5, 104)]),
+          "a pause, then a seek");
+    check(!IKProbePlaybackStarted(@[playCall(@"x", nil, @10, 100), playCall(@"x", nil, @10.3, 101), playCall(@"x", nil, @10.6, 102)]),
+          "small steps far slower than the clock");
+    check(IKProbePlaybackStarted(@[playCall(@"x", nil, @10, 100), playCall(@"x", nil, @12, 102), playCall(@"x", nil, @14, 104)]),
+          "two intervals that follow the clock are playback");
+    check(!IKProbePlaybackStarted(@[playCall(@"x", nil, @10, 100), playCall(@"x", nil, @90, 102), playCall(@"x", nil, @92, 104)]), "a seek, then progress");
+    check(!IKProbePlaybackStarted(@[playCall(@"x", nil, @10, 100), playCall(@"y", nil, @12, 102), playCall(@"y", nil, @14, 104)]), "another title");
+    check(!IKProbePlaybackStarted(@[playCall(@"x", @0, @10, 100), playCall(@"x", nil, @12, 102), playCall(@"x", nil, @14, 104)]),
+          "an interval that starts paused does not count");
+    check(!IKProbePlaybackStarted(@[playCall(@"x", nil, @10, 100), playCall(@"x", nil, @10.1, 100.1), playCall(@"x", nil, @10.2, 100.2)]),
+          "intervals shorter than 0.2 s do not count");
+    check(IKProbePlaybackStarted(@[playCall(@"x", @1, nil, 1)]), "a positive rate is playback");
+    check(!IKProbePlaybackStarted(@[playCall(@"x", nil, @10, 100), playCall(@"x", nil, @12, 102), playCall(@"x", @0, @14, 104)]),
+          "a zero rate wins over a moving position");
+    check(!IKProbePlaybackStarted(@[playCall(nil, @1, nil, 1)]) && !IKProbePlaybackStarted(@[]) && !IKProbePlaybackStarted(nil), "no title, no playback");
+
+    // A sample that cannot be written keeps its mark. A guard in the first format counts for both triggers.
+    NSURL *stuck = [folder URLByAppendingPathComponent:@"stuck/Library/IslandKit" isDirectory:YES];
+    put(stuck, @"lyric-probe-classes.plist/blocker", [NSData dataWithBytes:"x" length:1]);
+    check(IKProbeBeginSampling(stuck, @"1.0", @"launch", NULL) && !IKProbeSaveSample(stuck, @{@"schema": @1}, @"launch"), "a sample that cannot be written");
+    check(IKProbeBeginSampling(stuck, @"1.0", @"launch", &attempts) && attempts == 1, "keeps its unfinished mark and counts as an attempt");
+    [NSFileManager.defaultManager removeItemAtURL:[stuck URLByAppendingPathComponent:IKProbeClassesName] error:nil];
+    check(IKProbeSaveSample(stuck, @{@"schema": @1}, @"launch") && IKReadEvidence([stuck URLByAppendingPathComponent:IKProbeClassesName]) &&
+          ![NSFileManager.defaultManager fileExistsAtPath:[stuck URLByAppendingPathComponent:IKProbeGuardName].path], "a written sample clears it");
+    check([@{@"version": @"1.0", @"attempts": @2} writeToURL:[stuck URLByAppendingPathComponent:IKProbeGuardName] atomically:YES] &&
+          !IKProbeBeginSampling(stuck, @"1.0", @"launch", &attempts) && attempts == 2 && !IKProbeBeginSampling(stuck, @"1.0", @"playback", NULL) &&
+          IKProbeBeginSampling(stuck, @"1.1", @"launch", NULL), "an old single count applies to both triggers of its version");
+
+    // Directories the probe will find: one written in the fixture framework, one only the user could have named.
+    NSString *hidden = [@"Zed" stringByAppendingString:@"quist"];
+    [NSFileManager.defaultManager createDirectoryAtURL:[folder URLByAppendingPathComponent:@"Library/Caches/KaraokeCache"]
+                           withIntermediateDirectories:YES attributes:nil error:nil];
+    [NSFileManager.defaultManager createDirectoryAtURL:[[folder URLByAppendingPathComponent:@"Documents"] URLByAppendingPathComponent:hidden]
+                           withIntermediateDirectories:YES attributes:nil error:nil];
+    NSURL *namesFile = [directory URLByAppendingPathComponent:IKProbeNamesName];
 
     Class center = objc_getClass("MPNowPlayingInfoCenter");
     check(center != Nil, "MediaPlayer is loaded");
@@ -574,11 +710,18 @@ static void testProbe(NSURL *folder, NSString *bundlePath) {
     NSDictionary *launch = IKReadEvidence(classes);
     check([launch[@"bundleID"] isEqual:@"com.tencent.QQMusic"] && [launch[@"classes"] count] == 0 && [launch[@"matched"] isEqual:@0],
           "the launch sample leaves out the library that carries the probe");
+    check(waitFor(^BOOL { return IKReadEvidence(namesFile) != nil; }) && [IKReadEvidence(namesFile)[@"checked"] unsignedIntegerValue] >= 2 &&
+          ![IKReadEvidence(namesFile)[@"names"] containsObject:@"KaraokeCache"], "before the framework loads, no name is confirmed");
 
     NSString *framework = [bundlePath stringByAppendingPathComponent:@"Frameworks/FixtureLyrics.framework/FixtureLyrics"];
     void *handle = dlopen(framework.fileSystemRepresentation, RTLD_NOW);
     check(handle != NULL, "a framework inside the bundle loads after launch");
     BOOL (*touched)(void) = dlsym(handle, "FixtureLyricsTouched");
+    BOOL complete = NO;
+    NSSet *confirmed = IKProbeConfirmNames(@[@"KaraokeCache", hidden, @"Zz9"], IKProbeAppImages(bundlePath, executableOf(bundlePath)), 2, &complete);
+    check([confirmed isEqual:[NSSet setWithObject:@"KaraokeCache"]] && complete, "only a whole run in the player's strings is confirmed");
+    check(!IKProbeConfirmNames(@[@"KaraokeCache"], @[], 2, NULL).count && !IKProbeConfirmNames(@[], IKProbeAppImages(bundlePath, nil), 2, NULL).count,
+          "no images or no names, nothing confirmed");
 
     MPNowPlayingInfoCenter *shared = MPNowPlayingInfoCenter.defaultCenter;
     // The player prepares the next track while paused: a title without a rate, then the same position, then rate 0.
@@ -587,6 +730,9 @@ static void testProbe(NSURL *folder, NSString *bundlePath) {
     double before = NSProcessInfo.processInfo.systemUptime;
     shared.nowPlayingInfo = info;
     usleep(100000);
+    shared.nowPlayingInfo = info;
+    usleep(300000);
+    info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = @1.5;  // #137: a small seek while paused, still without a rate
     shared.nowPlayingInfo = info;
     info[MPNowPlayingInfoPropertyPlaybackRate] = @0;
     shared.nowPlayingInfo = info;
@@ -618,6 +764,9 @@ static void testProbe(NSURL *folder, NSString *bundlePath) {
     for (NSString *row in late[@"im"]) if ([row hasPrefix:@"sentenceAtTime: @"]) method = YES;
     for (NSString *row in late[@"ivars"]) if ([row isEqual:@"_sentences @\"NSArray\""]) ivar = YES;
     check(method && ivar && touched && !touched(), "its members are read without sending it a message");
+    NSArray *confirmedNames = IKReadEvidence(namesFile)[@"names"];
+    check([confirmedNames containsObject:@"KaraokeCache"] && ![confirmedNames containsObject:hidden] && [IKReadEvidence(namesFile)[@"complete"] isEqual:@YES],
+          "the playback sample confirms the name the framework writes, not the user's");
     // The class file is written before the mark is cleared, so wait for the probe queue to finish.
     check(waitFor(^BOOL { return ![NSFileManager.defaultManager fileExistsAtPath:guard.path]; }), "no sampling mark is left");
     for (NSURL *file in @[classes, events])

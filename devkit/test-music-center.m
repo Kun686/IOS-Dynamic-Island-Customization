@@ -124,6 +124,11 @@ static void testSampleFolder(void) {
     report = [IKMusicCenter sampleReportAtURL:root];
     check([report containsString:@"matched=32"] && [report containsString:@"limited=1"], "limit reports from large folders");
     check(![IKMusicCenter sampleReportAtURL:[root URLByAppendingPathComponent:@"missing"]], "missing folder is distinct from no matches");
+    NSURL *plain = [NSURL fileURLWithPath:[store stringByAppendingPathComponent:@"plain-samples"] isDirectory:YES];
+    [fm createDirectoryAtURL:plain withIntermediateDirectories:YES attributes:nil error:nil];
+    [binary writeToURL:[plain URLByAppendingPathComponent:@"song.krc"] atomically:YES];
+    report = [IKMusicCenter sampleReportAtURL:plain];
+    check([report containsString:@"matched=1"] && [report containsString:@"<sample>/*.krc bytes=3 header=binary"], "#137: a KRC sample is found and named");
 }
 
 // The export joins what the probe saved inside the player, what the HUD saw, and the container's file shapes.
@@ -156,6 +161,14 @@ static void testEvidenceExport(IKMusicCenter *center) {
     NSURL *cached = [container URLByAppendingPathComponent:@"Documents/Lyric/20231234.yrc"];
     [NSFileManager.defaultManager createDirectoryAtURL:cached.URLByDeletingLastPathComponent withIntermediateDirectories:YES attributes:nil error:nil];
     [@"[1000,2000](1000,500,0)证据缓存" writeToURL:cached atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    // The probe confirmed one directory name in the player's binary. The other unknown word stays hidden.
+    for (NSString *path in @[@"Library/Caches/KaraokeCache/lyric/7.qrc", @"Library/Caches/QuuxStore/lyric/8.qrc"]) {
+        NSURL *url = [container URLByAppendingPathComponent:path];
+        [NSFileManager.defaultManager createDirectoryAtURL:url.URLByDeletingLastPathComponent withIntermediateDirectories:YES attributes:nil error:nil];
+        [[NSData dataWithBytes:"\0\1" length:2] writeToURL:url atomically:YES];
+    }
+    [@{@"schema":@1, @"bundleID":bundle, @"names":@[@"KaraokeCache", @"bad name", @"证据"]}
+        writeToURL:[directory URLByAppendingPathComponent:IKProbeNamesName] atomically:YES];
     NSString *report = [IKMusicCenter playbackDiagnosticReport];
     check([report containsString:@"lyric probe app=com.netease.cloudmusic classes=absent"] &&
           [report containsString:@"lyric probe app=com.tencent.QQMusic classes=absent"], "export says when the probe has not run");
@@ -163,8 +176,11 @@ static void testEvidenceExport(IKMusicCenter *center) {
           [report containsString:@"lyric events app=com.netease.cloudmusic side=hud captured="] &&
           [report containsString:@"pos=10.00 rate=1.00 dur=240.0 changed=artist len=7\n"] &&
           [report containsString:@"lyric events app=com.tencent.QQMusic side=player absent"], "export lists field changes from both sides");
-    check([report containsString:@"lyric latency app=com.netease.cloudmusic paired=4 ambiguous=0 unmatched="] &&
-          [report containsString:@"match=state+position min=0.03"], "export measures the delay between the player and the HUD");
+    check([report containsString:@"lyric latency app=com.netease.cloudmusic paired=4 positionMatched=4 positionMissing=0 positionIgnored=0 ambiguous=0 unmatched="] &&
+          [report containsString:@" min=0.03"], "export measures the delay between the player and the HUD");
+    check([report containsString:@"\n  Library/Caches/KaraokeCache/lyric/<num>.qrc"] && [report containsString:@"\n  Library/Caches/<word>Store/lyric/<num>.qrc"] &&
+          [report containsString:@"confirmedNames=1 "] && ![report containsString:@"Quux"] && ![report containsString:@"bad name"],
+          "export shows directory names the probe confirmed, and only those");
     check([report containsString:@"container scan app=com.netease.cloudmusic directories="] &&
           [report containsString:@"\n  Documents/Lyric/<num>.yrc ext=yrc files=1 bytes="] && [report containsString:@"header=timed-text sampled=1"],
           "export includes the container's lyric file shapes");
@@ -204,6 +220,55 @@ static void testRoundAttribution(IKMusicCenter *center) {
     double seen = after.lastObject[0].doubleValue;
     check(seen >= arrived && seen < arrived + 0.04, "timed when the dictionary arrived, not when it was requested or attributed");
     check([center.title isEqual:@"另一首"], "the HUD itself still switches players");
+
+    // #137: the island applied round 1's dictionary, then round 2 started before round 1's app ID returned.
+    // The dictionary was shown when it arrived, so it is recorded with that time, once.
+    metadata = @{@"Title":@"第三首", @"Artist":@"三号歌手名字", @"Duration":@199, @"ElapsedTime":@9, @"QueueIndex":@32};
+    delayBundle = YES;
+    double shownFrom = NSProcessInfo.processInfo.systemUptime;
+    [center refresh];
+    double shownTo = NSProcessInfo.processInfo.systemUptime;
+    void (^lateApp)(NSString *) = bundleReply;
+    check([center.title isEqual:@"第三首"], "the island shows round 1 before its app ID returns");
+    delayInfo = YES;
+    [center refresh];
+    void (^app2)(NSString *) = bundleReply;
+    void (^info2)(CFDictionaryRef) = infoReply;
+    NSUInteger count = hudEvents(@"com.netease.cloudmusic").count;
+    usleep(30000);
+    lateApp(bundle);
+    NSArray<NSArray<NSNumber *> *> *events = hudEvents(@"com.netease.cloudmusic");
+    check(events.count == count + 1 && events.lastObject[5].unsignedIntegerValue == 3 &&
+          events.lastObject[0].doubleValue >= shownFrom && events.lastObject[0].doubleValue <= shownTo,
+          "an applied dictionary keeps its arrival time when its app ID returns after the next refresh started");
+    info2((__bridge CFDictionaryRef)metadata);
+    app2(bundle);
+    check(hudEvents(@"com.netease.cloudmusic").count == count + 1, "the next round with the same fields adds nothing");
+
+    // #137: round 3's dictionary arrives only after round 4 started. The HUD drops it, so it is not recorded either.
+    NSDictionary *stale = @{@"Title":@"第四首", @"Artist":@"四号", @"Duration":@188, @"ElapsedTime":@4, @"QueueIndex":@33};
+    NSDictionary *fresh = @{@"Title":@"第五首", @"Artist":@"五号歌手", @"Duration":@177, @"ElapsedTime":@5, @"QueueIndex":@34};
+    metadata = stale;
+    [center refresh];
+    void (^app3)(NSString *) = bundleReply;
+    void (^info3)(CFDictionaryRef) = infoReply;
+    metadata = fresh;
+    [center refresh];
+    void (^app4)(NSString *) = bundleReply;
+    void (^info4)(CFDictionaryRef) = infoReply;
+    count = hudEvents(@"com.netease.cloudmusic").count;
+    info3((__bridge CFDictionaryRef)stale);
+    app3(bundle);
+    check(hudEvents(@"com.netease.cloudmusic").count == count && ![center.title isEqual:@"第四首"],
+          "a dictionary that arrives after a newer refresh started is neither shown nor recorded");
+    double fresher = NSProcessInfo.processInfo.systemUptime;
+    info4((__bridge CFDictionaryRef)fresh);
+    app4(bundle);
+    events = hudEvents(@"com.netease.cloudmusic");
+    check(events.count == count + 1 && events.lastObject[5].unsignedIntegerValue == 3 && events.lastObject[6].unsignedIntegerValue == 4 &&
+          events.lastObject[0].doubleValue >= fresher && [center.title isEqual:@"第五首"], "the newer round is shown and recorded");
+    delayBundle = NO;
+    delayInfo = NO;
 }
 
 int main(int argc, const char **argv) { @autoreleasepool {

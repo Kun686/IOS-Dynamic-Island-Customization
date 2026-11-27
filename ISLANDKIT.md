@@ -58,13 +58,13 @@ QQ 音乐、网易云音乐各有一个适配器。0.6.4 可以使用宿主播�
 
 ## 内部歌词数据探针（0.6.5）
 
-路线是给两款播放器各写注入插件，直接拿播放器内部带时间轴的歌词。动手之前先要知道歌词数据在哪个类、哪个文件里，以及“慢一句”是播放器发得晚还是系统传得晚。探针只回答这三个问题：只取证，不取词。不解密文件，不调用播放器自己的方法，不读任何对象的值，不联网。
+路线是给两款播放器各写注入插件，直接拿播放器内部带时间轴的歌词。动手之前先要知道歌词数据在哪个类、哪个文件里，以及“慢一句”是播放器发得晚还是系统传得晚。探针只回答这三个问题：只取证，不取词。不解密文件，不调用播放器自己的方法，不读任何对象的值，不联网。唯一读到的二进制内容是播放器自己镜像里的常量字符串区，只用来核对目录名是不是写死在播放器里（见下面“容器里的文件形状”），读到的内容不保存。
 
 ### 播放器里的探针
 
 `IslandKit-PlaybackDiagnostics.dylib` 从 0.6.5 起带探针，两个适配器不带。库的构造函数只在 bundle ID 是 `com.tencent.QQMusic` 或 `com.netease.cloudmusic` 的进程里启动探针，一个进程只启动一次。
 
-类清单在启动 6 秒后采一次，确认开始播放后 3 秒再采一次。“开始播放”指播放器发布了大于 0 的速率；没有发布速率时，指同一首歌的进度跟着时间往前走了。只发布歌名（预载下一首）、速率为 0 或进度不动，都不算，这次采样会留到真正播放时。播放器既不发布速率、进度也不更新时，不做播放采样，只有启动采样。
+类清单在启动 6 秒后采一次，确认开始播放后 3 秒再采一次。“开始播放”指最新一次发布的速率大于 0；没有发布速率时，指同一首歌最近连续两段间隔里进度都跟着时间走：每段至少 0.2 秒，进度前进的量在经过时间的一半到两倍之间。只发布歌名（预载下一首）、速率为 0、进度不动、拖动（包括暂停时拖动半秒这样的小幅拖动），或者只有一段间隔对得上，都不算，这次采样会留到真正播放时。播放器既不发布速率、进度也不定期更新时，不做播放采样，只有启动采样。
 
 - 范围是路径在 `.app` 目录里的镜像，也就是主程序和包内框架。系统库和 IslandKit 自己的库不算。
 - 类名含 lyric、lrc、qrc、yrc、krc（不分大小写）的类入选。只是因为 `QRCode` 才含 qrc 的不算。
@@ -73,7 +73,8 @@ QQ 音乐、网易云音乐各有一个适配器。0.6.4 可以使用宿主播�
 - 上限：600 个类带成员，再有 1500 个只列类名，更多的只计入 `dropped`。每个类每种成员最多 300 条。名字留 160 个字符，类型编码留 200 个，截断的以 `~` 结尾。成员明细总共约 640 KB，用完后其余的类只列名字，并标 `budgetLimited=1`。
 - 名字含 View、Cell、Button、Label、Layer 的类（ViewModel 除外）排在后面，先把额度给更像数据和逻辑的类。
 - 第二次采样里新出现的类标 `late`，通常来自放歌时才加载的框架。
-- 采样前在 `lyric-probe-sampling.plist` 里给这次采样（`launch` 或 `playback`）记一次，采完只清掉这一种。同一个播放器版本里，某一种连续两次没采完（例如采样时进程被杀），这一种就不再尝试，另一种照常采。导出里会有一行 `class sampling unfinished launch=… playback=…`。
+- 采样前在 `lyric-probe-sampling.plist` 里给这次采样（`launch` 或 `playback`）记一次，类清单文件写成功后才清掉这一种；写失败（磁盘满、文件过大）也算没采完。同一个播放器版本里，某一种连续两次没采完（例如采样时进程被杀），这一种就不再尝试，另一种照常采。早期格式只有一个总次数，读到时按两种各记这个次数处理。导出里会有一行 `class sampling unfinished launch=… playback=…`。
+- 每次采样还会列出本容器 `Documents`、`Library`、`tmp` 下的目录名（和容器扫描同样的深度、条目、时间上限，不跟随链接），挑出报告里会被遮成 `<word>` 的那些字母数字串，到主程序和包内框架的 `__TEXT,__cstring`（常量字符串区）里找。某个串作为完整的字母数字串出现在那里，就说明它是播放器写死的名字，记进 `lyric-probe-names.plist`。只记录确认过的名字，常量区的其他内容不保存。查找最多 1.5 秒，超时会标 `complete=0`。
 
 字段变化的时刻取自 `-[MPNowPlayingInfoCenter setNowPlayingInfo:]`。探针把这个方法包了一层：先读系统运行时间，调用原来的实现，再比较标题、歌手、专辑和上一次是否相同。
 
@@ -81,11 +82,11 @@ QQ 音乐、网易云音乐各有一个适配器。0.6.4 可以使用宿主播�
 - 文字只留在内存里做比较，不写盘。记录里全是数字。
 - 保留最近 200 条，最多每 1.5 秒写一次盘。
 
-结果写在播放器容器的 `Library/IslandKit/`：`lyric-probe-classes.plist` 和 `lyric-probe-events.plist`。
+结果写在播放器容器的 `Library/IslandKit/`：`lyric-probe-classes.plist`、`lyric-probe-events.plist` 和 `lyric-probe-names.plist`。
 
 ### 悬浮端的时刻
 
-`IKMusicCenter` 收到系统的“正在播放”变化时，用同一套规则（`IKLyricEventLog`）记一条。时间取这一轮播放信息字典送到悬浮端的那一刻。归属的播放器取同一轮请求返回的应用 ID：字典先到、应用 ID 后到时，等应用 ID 到了再记，而且每轮只记一次。被新一轮请求取代的旧轮次只要先完成，照样记；比已记录的轮次更旧的结果丢弃，避免把旧状态重放一遍。文件是 `/var/mobile/Library/IslandKit/lyric-hud-events-<小写 bundle ID>.plist`。两边读的是同一个系统运行时间，可以直接相减。
+`IKMusicCenter` 收到系统的“正在播放”变化时，用同一套规则（`IKLyricEventLog`）记一条。记录的是“岛拿到并用上了什么、在什么时刻”：只有悬浮端实际应用的字典才算，时间取它送到的那一刻。字典送到时如果新一轮请求已经开始，悬浮端会丢掉它，记录里也不算。归属的播放器取同一轮请求返回的应用 ID：字典先到、应用 ID 后到时，等应用 ID 到了再记，每轮只记一次；应用 ID 晚到新一轮开始之后也照样记，因为这一轮的字典当时已经显示在岛上了，改记到下一轮会把延迟算长。比已记录的轮次更旧的结果丢弃，保证记录按顺序。文件是 `/var/mobile/Library/IslandKit/lyric-hud-events-<小写 bundle ID>.plist`。两边读的是同一个系统运行时间，可以直接相减。
 
 应用 ID 和字典是两次独立的系统请求。如果恰好在两次请求之间换了播放器，仍可能把一条记到错误的播放器上；系统接口没有办法把两者绑在一起。
 
@@ -106,13 +107,15 @@ QQ 音乐、网易云音乐各有一个适配器。0.6.4 可以使用宿主播�
 | 20 位以上且含 4 个以上数字的字母数字串 | `<id>` |
 | 含 `@`（邮箱形式的账号）或非 ASCII 字符的段，带空格的文件名 | `<text>` |
 | 超过 64 个字符的段 | `<long>` |
-| 目录名里不在词表中的词，相邻的合成一个 | `<word>` |
+| 目录名里不在词表中、也没有经探针确认的词，相邻的合成一个 | `<word>` |
 | 文件主名里两个字母以上的词，除非主名含关键词 | `<word>` |
 
 - 目录名里保留的词：含关键词的词、技术词表里的词（`Documents`、`Caches`、`Application`、`Support`、`download`、`cache`、`song`、`tencent`、`netease`、`cloudmusic` 等，见 `sources/IKLyricEvidence.m` 的 `IKVocabulary`）、两个字母以内的词、四个字母以内的大写缩写（`QQ`、`MMKV`、`HTTP`）。所以 `Application Support`、`com.tencent.QQMusic`、`LyricCache` 原样保留，`johnsmith` 变成 `<word>`，`QQJohnCache` 变成 `QQ<word>Cache`。
 - 文件主名更严：只有含关键词时才保留词表里的词，例如 `lyric_cache.db`、`QQLyricCache_v2.plist`。`Hello.lrc`、`index.json` 分别是 `<word>.lrc`、`<word>.json`，哪怕目录里只有这一个文件。扩展名保留词表里的词和四个字母以内的词，`Mr.Brightside` 的扩展名也是 `<word>`。
-- 代价是：播放器写死、但不在词表里的英文目录名也会显示成 `<word>`。真机报告里关键目录显示成 `<word>` 时，把它的位置告诉我们，再决定是否把这个词加进词表。
-- 上限：目录深 10 层（`Documents` 算第 1 层）、6 万个目录项、240 行、读 600 次文件头、6 秒。触到哪个上限，`limited=` 里就写哪个。`complete=1` 只表示所有目录都读完、所有匹配的文件都列出、文件头额度也没用完，触到任何一个上限都是 `complete=0`。
+- 播放器写死、但不在词表里的英文目录名，靠探针确认：`lyric-probe-names.plist` 里的名字（只接受 1–64 个字母数字、至少一个字母、属于这款播放器）在目录名里原样显示，例如 `KaraokeCache`。摘要里的 `confirmedNames=` 是靠确认才显示出来的目录名数量。数字、十六进制、UUID、长 ID 形状的串即使被确认也照样遮蔽。账号名、歌名不会写在播放器二进制里，所以还是 `<word>`。
+- 没有注入探针、名字是运行时拼出来的、或者是 Swift 的 15 字节以内短字符串（编进指令里，不在常量区）时，确认不了，仍显示 `<word>`。用户自己起的目录名恰好和播放器常量区里某个完整的串一样时（例如一个叫 `Yellow` 的目录），会被显示出来。
+- 上限：目录深 10 层（`Documents` 算第 1 层）、6 万个目录项、240 行、读 600 次文件头、6 秒。触到哪个上限，`limited=` 里就写哪个。`complete=1` 只表示所有目录都打开了、所有匹配的文件都读到并列出、没有触到任何上限；有打不开的目录或读不了的文件（`unreadable` 不为 0）、或触到任何一个上限，都是 `complete=0`。
+- 关键词含 krc（酷狗格式）。播放诊断里本地媒体旁的同名文件、导出样本文件夹检查，也都认 `.krc`。
 - 名字含关键词的目录和它下面的目录优先读，避免一个无关的大缓存先把上限用完。
 - 不跟随符号链接。目录从容器根起一层一层打开，每一层都拒绝符号链接，所以扫描途中有目录被换成链接，也不会读到容器外面。文件头、文件类型和大小在同一个文件描述符上读取，打开时同样拒绝链接，也不会被换进来的管道文件卡住。跳过 `Library/IslandKit`。
 
@@ -133,17 +136,19 @@ lyric events app=com.tencent.QQMusic side=player captured=… kept=… total=…
   t=81234.512 pos=63.20 rate=1.00 dur=215.0 changed=artist len=12
 lyric events app=com.tencent.QQMusic side=hud captured=… kept=… total=…
   t=81234.530 pos=63.20 rate=1.00 dur=215.0 changed=artist len=12
-lyric latency app=com.tencent.QQMusic paired=55 ambiguous=2 unmatched=1 player=60 hud=58 match=state+position min=… median=… p90=… max=… (seconds, HUD seen minus player set)
-container scan app=com.tencent.QQMusic directories=… entries=… matched=… rows=… unlisted=… symlinks=… unreadable=… tooDeep=… complete=1 limited=none seconds=…
+lyric latency app=com.tencent.QQMusic paired=55 positionMatched=50 positionMissing=4 positionIgnored=1 ambiguous=2 unmatched=1 player=60 hud=58 min=… median=… p90=… max=… (seconds, HUD seen minus player set)
+container scan app=com.tencent.QQMusic directories=… entries=… matched=… rows=… unlisted=… symlinks=… unreadable=… tooDeep=… confirmedNames=… complete=1 limited=none seconds=…
   Library/…/Lyric/ directory
   Library/…/Lyric/<num>.qrc ext=qrc files=132 bytes=1204..8830 header=binary sampled=8
 ```
 
 - 成员行的前缀：`-` 实例方法，`+` 类方法，`@` 属性，`.` 成员变量。
 - `t` 是系统运行时间（秒），`pos` 是当时播放信息里的进度，`len` 是变化后的文字长度。`first` 是这次运行记下的第一条，`newDuration` 表示时长也变了，一般是换歌。
-- `lyric latency` 只衡量系统把播放器设置的信息送到悬浮端花了多久。配对看变化之后的整个状态：标题、歌手、专辑三个长度和时长都相同；两边都记了进度时，进度也要相同（差 10 毫秒以内，两边读的是同一份播放字典）。悬浮端的每次变化，只和它之前 10 秒内、上一对之后、状态相同的那一条播放器记录配对。
-- 符合条件的播放器记录不止一条时无法区分，不配对，计入 `ambiguous`，不会去猜。例如两句等长、悬浮端漏掉了前一句：有进度时靠进度区分，没有进度时就算歧义，不会把 30 毫秒报成 4 秒。找不到对应记录的计入 `unmatched`。
-- 带进度一对也配不上时，会不看进度再配一次，并标 `match=state`，用来应对系统改写进度的情况。等长歧义照样不配。
+- `lyric latency` 只衡量系统把播放器设置的信息送到悬浮端、悬浮端用上它花了多久。悬浮端的每次变化，只和它之前 10 秒内、上一对之后的一条播放器记录配对，这条记录要同时满足：
+  - 变化之后的状态相同：标题、歌手、专辑三个长度和时长都相同；两边都记了进度时，进度也要相同（差 10 毫秒以内，两边读的是同一份播放字典）。
+  - 变的字段对得上：已知悬浮端上一次看到的是哪条记录时（上一对，或者悬浮端第一次观察时对应的那条），从那条之后到这条为止，播放器改过的字段合起来，要正好等于悬浮端看到变了的字段。几次调用被系统合并成一次送达时，配到的是最后一次。不知道上一次对应哪条时，只要求这条改过的字段都在悬浮端看到的变化里。
+- 符合条件的记录不止一条时无法区分，不配对，计入 `ambiguous`，不会去猜。例如两句等长、悬浮端漏掉了前一句：有进度时靠进度区分；没有进度但改的字段不同，靠字段区分；两样都一样时才算歧义，不会把 30 毫秒报成 4 秒。找不到对应记录的计入 `unmatched`。
+- 每一次变化单独回退：带进度配不上，就只对这一次不看进度再配一次。`positionMatched`、`positionMissing`、`positionIgnored` 分别是进度一致、至少一边没有进度、不看进度才配上的数量。`positionIgnored` 较多时，说明系统改写了进度。
 - 这个延迟回答不了“播放器是不是发得晚”。延迟只有几十毫秒，说明系统传递不是慢一句的原因；播放器是否晚发，要拿 player 一侧每条记录的 `pos` 和这句在同一录音歌词文件里的开始时间比，这一步需要歌词文件，这份报告给不出结论。延迟达到秒级时，系统或悬浮端是瓶颈之一。
 - `paired=0` 时看 `reason`：`no-player-events` 是探针没运行或没放歌，`no-hud-events` 是悬浮窗没开，`different-boot` 是两份记录不属于同一次开机，`ambiguous` 是对得上的变化都有歧义，`no-overlap` 是两边没有对得上的变化。
 - 没有探针结果时写 `classes=absent` 和 `side=player absent`。读回来的文件按不可信输入处理：类名、方法名只能是符号字符；类型编码不能有空格和非 ASCII；镜像路径必须是相对路径、不超过 8 段，每一段再脱敏一次结果不变（含空格、非 ASCII 或 `@` 的都不行）。不符合的条目丢弃并计入 `invalid`。
@@ -152,6 +157,7 @@ container scan app=com.tencent.QQMusic directories=… entries=… matched=… r
 
 - 没有在真机的 QQ 音乐、网易云音乐里运行过。类清单的实际规模、两款播放器是否允许注入后正常启动，都要等真机结果。
 - 只看数据容器里的三个目录。App Group 共享容器没有看。
+- 目录名确认只查 `__TEXT,__cstring`。Swift 短字符串、运行时拼接的名字确认不了，仍是 `<word>`。
 - 只知道类和方法叫什么，不知道哪个对象属于正在播放的歌。这要等拿到清单后再定下一步挂哪个方法。
 
 ## 和系统岛的层级关系

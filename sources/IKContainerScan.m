@@ -38,8 +38,52 @@ static int IKScanOpen(int root, NSArray<NSData *> *components) {
     return current == root ? -1 : current;
 }
 
+NSArray<NSString *> *IKContainerDirectoryNames(NSURL *container, IKScanLimits limits) {
+    NSMutableOrderedSet<NSString *> *names = [NSMutableOrderedSet orderedSet];
+    if (!container.isFileURL) return @[];
+    double (*clock)(void) = limits.clock ?: IKScanUptime;
+    double started = clock();
+    int root = open(container.fileSystemRepresentation, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (root < 0) return @[];
+    NSMutableArray<NSArray *> *queue = [NSMutableArray array];
+    for (NSString *name in @[@"Documents", @"Library", @"tmp"]) [queue addObject:@[@[IKScanName(name.UTF8String)], @1, name]];
+    NSUInteger entries = 0;
+    for (NSUInteger head = 0; head < queue.count && entries < limits.entries; head++) {
+        if (clock() - started > limits.seconds) break;
+        NSArray<NSData *> *components = queue[head][0];
+        NSUInteger level = [queue[head][1] unsignedIntegerValue];
+        int fd = IKScanOpen(root, components);
+        DIR *stream = fd < 0 ? NULL : fdopendir(fd);
+        if (!stream) { if (fd >= 0) close(fd); continue; }
+        struct dirent *entry;
+        while ((entry = readdir(stream)) && entries < limits.entries) {
+            if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
+            entries++;
+            unsigned char type = entry->d_type;
+            if (type == DT_UNKNOWN) {
+                struct stat info;
+                if (fstatat(fd, entry->d_name, &info, AT_SYMLINK_NOFOLLOW)) continue;
+                type = S_ISDIR(info.st_mode) ? DT_DIR : DT_UNKNOWN;
+            }
+            if (type != DT_DIR) continue;
+            NSString *name = [[NSString alloc] initWithBytes:entry->d_name length:strlen(entry->d_name) encoding:NSUTF8StringEncoding];
+            if (!name.length || (level == 1 && [queue[head][2] isEqual:@"Library"] && [name isEqual:@"IslandKit"])) continue;
+            [names addObject:name];
+            if (level + 1 <= limits.depth) [queue addObject:@[[components arrayByAddingObject:IKScanName(entry->d_name)], @(level + 1), name]];
+        }
+        closedir(stream);
+    }
+    close(root);
+    return names.array;
+}
+
 NSString *IKContainerScanReport(NSURL *container, NSString *bundle, IKScanLimits limits) {
+    return IKContainerScanReportKeeping(container, bundle, limits, nil);
+}
+
+NSString *IKContainerScanReportKeeping(NSURL *container, NSString *bundle, IKScanLimits limits, NSSet<NSString *> *fixed) {
     if (!container.isFileURL || ![bundle isKindOfClass:NSString.class]) return nil;
+    NSMutableSet<NSString *> *confirmed = [NSMutableSet set];
     double (*clock)(void) = limits.clock ?: IKScanUptime;
     double started = clock();
     int root = open(container.fileSystemRepresentation, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
@@ -89,7 +133,9 @@ NSString *IKContainerScanReport(NSURL *container, NSString *bundle, IKScanLimits
             if (type == DT_DIR) {
                 if (!name.length) { unreadable++; continue; }
                 if (level == 1 && [shown isEqual:@"Library"] && [name isEqual:@"IslandKit"]) continue;  // our own output
-                NSString *childShown = [NSString stringWithFormat:@"%@/%@", shown, IKRedactPathSegment(name)];
+                NSString *redacted = IKRedactPathSegment(name), *kept = fixed.count ? IKRedactPathSegmentKeeping(name, fixed) : redacted;
+                if (![kept isEqual:redacted]) [confirmed addObject:kept];
+                NSString *childShown = [NSString stringWithFormat:@"%@/%@", shown, kept];
                 if (keyword) [keywordDirectories addObject:childShown];
                 if (level + 1 > limits.depth) { tooDeep++; continue; }
                 NSArray *child = [components arrayByAddingObject:IKScanName(entry->d_name)];
@@ -163,12 +209,12 @@ NSString *IKContainerScanReport(NSURL *container, NSString *bundle, IKScanLimits
     if (rowLimit) [limited addObject:@"rows"];
     if (headerLimit) [limited addObject:@"headers"];
     if (tooDeep) [limited addObject:@"depth"];
-    // complete=1 only when every directory was read and every matching file is listed with a sampled header budget left.
-    BOOL complete = !unfinished && !limited.count;
+    // complete=1 only when every directory was opened, every matching file was read and listed, and no limit was hit.
+    BOOL complete = !unfinished && !limited.count && !unreadable;
     NSString *summary = [NSString stringWithFormat:
-        @"container scan app=%@ directories=%lu entries=%lu matched=%lu rows=%lu unlisted=%lu symlinks=%lu unreadable=%lu tooDeep=%lu complete=%d limited=%@ seconds=%.1f",
+        @"container scan app=%@ directories=%lu entries=%lu matched=%lu rows=%lu unlisted=%lu symlinks=%lu unreadable=%lu tooDeep=%lu confirmedNames=%lu complete=%d limited=%@ seconds=%.1f",
         bundle, (unsigned long)directories, (unsigned long)entries, (unsigned long)matched, (unsigned long)rows.count,
-        (unsigned long)unlisted, (unsigned long)symlinks, (unsigned long)unreadable, (unsigned long)tooDeep,
+        (unsigned long)unlisted, (unsigned long)symlinks, (unsigned long)unreadable, (unsigned long)tooDeep, (unsigned long)confirmed.count,
         complete, limited.count ? [limited componentsJoinedByString:@"+"] : @"none", clock() - started];
     [rows insertObject:summary atIndex:0];
     return [rows componentsJoinedByString:@"\n"];

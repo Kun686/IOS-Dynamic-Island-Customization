@@ -16,3 +16,9 @@ IKScanLimits IKDefaultScanLimits(void);
 // lyric / lrc / qrc / yrc / krc. Reports redacted relative paths, extension, size range and header kind.
 // Returns nil when the container cannot be opened.
 NSString *IKContainerScanReport(NSURL *container, NSString *bundle, IKScanLimits limits);
+// The same, keeping directory-name runs in `fixed` (names the probe confirmed in the player's binary) readable.
+NSString *IKContainerScanReportKeeping(NSURL *container, NSString *bundle, IKScanLimits limits, NSSet<NSString *> *fixed);
+
+// The distinct directory names below Documents, Library and tmp, with the same depth, entry and time limits and
+// the same refusal of symbolic links. Used by the probe inside the player to look for fixed names.
+NSArray<NSString *> *IKContainerDirectoryNames(NSURL *container, IKScanLimits limits);

@@ -435,9 +435,10 @@ static NSDictionary *IKSnapshot(NSString *path) {
     dispatch_queue_t main = dispatch_get_main_queue();
     __block NSDictionary *info;
     __block NSNumber *playing;
-    // Timing evidence for the probe report. Credit the dictionary once, to the app reported in the same round,
-    // and use the moment the dictionary arrived. A round that a newer refresh superseded still counts when it
-    // completes before that newer one; an older round finishing late is dropped so it cannot replay an old state.
+    // Timing evidence for the probe report: what the island was given and when. Only a dictionary this HUD applied
+    // counts, at the moment it arrived; a dictionary that arrives after a newer refresh started is dropped by the HUD
+    // and is not recorded either. It is credited once, to the app reported in the same round, even when that app ID
+    // arrives after the next refresh started. Rounds are recorded in order: an older one finishing late is dropped.
     __block NSDictionary *seenInfo;
     __block NSString *roundApp;
     __block BOOL appKnown = NO, noted = NO;
@@ -468,11 +469,11 @@ static NSDictionary *IKSnapshot(NSString *path) {
     });
     MRMediaRemoteGetNowPlayingInfo(main, ^(CFDictionaryRef result) {
         double arrived = NSProcessInfo.processInfo.systemUptime;
+        if (gen != self.generation) return;
         NSDictionary *copy = [(__bridge NSDictionary *)result copy] ?: @{};
         seenInfo = copy;
         seenAt = arrived;
         note();
-        if (gen != self.generation) return;
         info = copy;
         id rate = info[(__bridge NSString *)kMRMediaRemoteNowPlayingInfoPlaybackRate];
         [self applyInfo:info playing:playing ? playing.boolValue : (rate ? [rate doubleValue]>0 : self.isPlaying)];
@@ -557,7 +558,8 @@ static NSString *IKLyricEvidenceReport(NSString *bid) {
     if (unfinished) [parts addObject:unfinished];
     [parts addObject:IKLyricEventsReport(IKReadEvidence([directory URLByAppendingPathComponent:IKProbeEventsName]),
                                          IKReadEvidence(IKHUDEventsURL(bid)), bid)];
-    NSString *scan = IKContainerScanReport(container, bid, IKDefaultScanLimits());
+    NSSet *fixed = IKProbeConfirmedNames(IKReadEvidence([directory URLByAppendingPathComponent:IKProbeNamesName]), bid);
+    NSString *scan = IKContainerScanReportKeeping(container, bid, IKDefaultScanLimits(), fixed);
     [parts addObject:scan ?: [NSString stringWithFormat:@"container scan app=%@ unreadable", bid]];
     return [parts componentsJoinedByString:@"\n"];
 }

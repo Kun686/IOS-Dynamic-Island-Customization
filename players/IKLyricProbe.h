@@ -25,10 +25,20 @@ BOOL IKProbeHookNowPlaying(Class center, void (^observer)(NSDictionary *info, do
 BOOL IKProbeBeginSampling(NSURL *directory, NSString *version, NSString *trigger, NSUInteger *attempts);
 void IKProbeEndSampling(NSURL *directory, NSString *trigger);
 
-// `previous` and `current` describe two consecutive -setNowPlayingInfo: calls with the keys title, rate, elapsed
-// and uptime (each optional). Playback has started when the player publishes a positive rate, or, without a rate,
-// when the same title's position advances with the clock. A title alone, a zero rate or a jump does not count.
-BOOL IKProbePlaybackStarted(NSDictionary *previous, NSDictionary *current);
+// `recent` holds the last -setNowPlayingInfo: calls, oldest first, each with the keys title, rate, elapsed and
+// uptime (each optional). Playback has started when the newest call publishes a positive rate, or, without a rate,
+// when the same title's position advanced with the clock over the last two intervals: each interval at least
+// 0.2 s long and moving between half and twice the time that passed. A title alone, a zero rate, a seek
+// (also a small one while paused) or a single interval does not count.
+BOOL IKProbePlaybackStarted(NSArray<NSDictionary *> *recent);
+
+// Writes a class sample and clears this trigger's unfinished mark only when the file was written.
+BOOL IKProbeSaveSample(NSURL *directory, NSDictionary *packet, NSString *trigger);
+
+// Directory-name runs from `runs` that occur as a whole run of letters and digits in the __TEXT,__cstring section
+// of `images` (pairs from IKProbeAppImages). Such a name is written into the player itself, not chosen by the user.
+// Only membership is checked; nothing from the section is kept. `complete` is NO when `seconds` ran out.
+NSSet<NSString *> *IKProbeConfirmNames(NSArray<NSString *> *runs, NSArray<NSArray<NSString *> *> *images, double seconds, BOOL *complete);
 
 // Starts the probe in this process: hooks the now-playing setter, samples classes `launchDelay` seconds from now and
 // `playbackDelay` seconds after playback is first published, and saves field-change events at most every `flushDelay` seconds.

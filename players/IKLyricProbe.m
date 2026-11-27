@@ -1,7 +1,10 @@
 #import "IKLyricProbe.h"
 #import "IKPlaybackDiagnostic.h"
+#import "IKContainerScan.h"
 #import <MediaPlayer/MediaPlayer.h>
 #import <dlfcn.h>
+#import <mach-o/dyld.h>
+#import <mach-o/getsect.h>
 #import <objc/runtime.h>
 
 #pragma mark - App images
@@ -141,7 +144,12 @@ static NSMutableDictionary<NSString *, NSNumber *> *IKProbeGuardCounts(NSURL *fi
     NSDictionary *old = IKReadEvidence(file);
     NSMutableDictionary<NSString *, NSNumber *> *counts = [NSMutableDictionary dictionary];
     NSDictionary *attempts = old[@"attempts"];
-    if (![old[@"version"] isEqual:version] || ![attempts isKindOfClass:NSDictionary.class]) return counts;
+    if (![old[@"version"] isEqual:version]) return counts;
+    // The first format kept one count for both triggers. Apply it to both rather than forget it.
+    if ([attempts isKindOfClass:NSNumber.class] && [(NSNumber *)attempts unsignedIntegerValue] > 0)
+        return [@{@"launch": @(MIN([(NSNumber *)attempts unsignedIntegerValue], 99)),
+                  @"playback": @(MIN([(NSNumber *)attempts unsignedIntegerValue], 99))} mutableCopy];
+    if (![attempts isKindOfClass:NSDictionary.class]) return counts;
     for (NSString *trigger in @[@"launch", @"playback"]) {
         id value = attempts[trigger];
         if ([value isKindOfClass:NSNumber.class] && [value unsignedIntegerValue] > 0) counts[trigger] = @(MIN([value unsignedIntegerValue], 99));
@@ -178,16 +186,101 @@ void IKProbeEndSampling(NSURL *directory, NSString *trigger) {
     IKProbeWriteGuard(file, version, counts);
 }
 
-BOOL IKProbePlaybackStarted(NSDictionary *previous, NSDictionary *current) {
+// One interval between two calls on the same title in which the position followed the clock.
+static BOOL IKProbeAdvanced(NSDictionary *a, NSDictionary *b) {
+    if (![a[@"title"] isKindOfClass:NSString.class] || ![a[@"title"] isEqual:b[@"title"]]) return NO;
+    if ([a[@"rate"] isKindOfClass:NSNumber.class] && !([a[@"rate"] doubleValue] > 0)) return NO;  // the player said paused
+    id before = a[@"elapsed"], after = b[@"elapsed"];
+    if (![before isKindOfClass:NSNumber.class] || ![after isKindOfClass:NSNumber.class]) return NO;
+    double moved = [after doubleValue] - [before doubleValue];
+    double passed = [b[@"uptime"] doubleValue] - [a[@"uptime"] doubleValue];
+    if (!isfinite(moved) || !isfinite(passed) || passed < 0.2) return NO;
+    return moved >= passed * 0.5 - 0.05 && moved <= passed * 2 + 0.05;
+}
+
+BOOL IKProbePlaybackStarted(NSArray<NSDictionary *> *recent) {
+    if (![recent isKindOfClass:NSArray.class]) return NO;
+    NSDictionary *current = recent.lastObject;
     if (![current[@"title"] isKindOfClass:NSString.class] || ![current[@"title"] length]) return NO;
     id rate = current[@"rate"];
     if ([rate isKindOfClass:NSNumber.class]) return [rate doubleValue] > 0 && isfinite([rate doubleValue]);
-    if (![previous[@"title"] isEqual:current[@"title"]]) return NO;
-    id before = previous[@"elapsed"], after = current[@"elapsed"];
-    if (![before isKindOfClass:NSNumber.class] || ![after isKindOfClass:NSNumber.class]) return NO;
-    double moved = [after doubleValue] - [before doubleValue];
-    double passed = [current[@"uptime"] doubleValue] - [previous[@"uptime"] doubleValue];
-    return isfinite(moved) && isfinite(passed) && passed > 0 && moved >= 0.25 && moved <= passed * 2 + 1;
+    // Without a rate, one interval could be a seek that happens to fit. Two in a row are playback.
+    NSUInteger n = recent.count;
+    return n >= 3 && IKProbeAdvanced(recent[n - 3], recent[n - 2]) && IKProbeAdvanced(recent[n - 2], current);
+}
+
+BOOL IKProbeSaveSample(NSURL *directory, NSDictionary *packet, NSString *trigger) {
+    if (!directory.isFileURL || ![packet isKindOfClass:NSDictionary.class]) return NO;
+    NSData *data = [NSPropertyListSerialization dataWithPropertyList:packet format:NSPropertyListBinaryFormat_v1_0 options:0 error:nil];
+    if (!data.length || data.length > IKEvidenceMaxFileBytes ||
+        ![data writeToURL:[directory URLByAppendingPathComponent:IKProbeClassesName] options:NSDataWritingAtomic error:nil]) return NO;
+    IKProbeEndSampling(directory, trigger);
+    return YES;
+}
+
+#pragma mark - Fixed directory names
+
+static BOOL IKProbeAlnum(uint8_t c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'); }
+
+static uint32_t IKProbeHash(const uint8_t *bytes, size_t length) {
+    uint32_t hash = 2166136261u;
+    for (size_t i = 0; i < length; i++) hash = (hash ^ bytes[i]) * 16777619u;
+    return hash;
+}
+
+NSSet<NSString *> *IKProbeConfirmNames(NSArray<NSString *> *runs, NSArray<NSArray<NSString *> *> *images, double seconds, BOOL *complete) {
+    if (complete) *complete = YES;
+    NSMutableSet<NSString *> *found = [NSMutableSet set];
+    // Open addressing over the candidate runs. Runs are ASCII letters and digits, at most 64 long.
+    NSMutableArray<NSData *> *names = [NSMutableArray array];
+    uint64_t lengths = 0;
+    for (NSString *run in runs) {
+        NSData *bytes = [run dataUsingEncoding:NSASCIIStringEncoding];
+        if (bytes.length < 1 || bytes.length > 63 || names.count >= 4096) continue;
+        [names addObject:bytes];
+        lengths |= 1ull << bytes.length;
+    }
+    if (!names.count) return found;
+    NSUInteger slots = 1;
+    while (slots < names.count * 4) slots <<= 1;
+    NSMutableData *table = [NSMutableData dataWithLength:slots * sizeof(uint32_t)];
+    uint32_t *index = table.mutableBytes;
+    for (NSUInteger i = 0; i < names.count; i++) {
+        uint32_t slot = IKProbeHash(names[i].bytes, names[i].length) & (uint32_t)(slots - 1);
+        while (index[slot]) slot = (slot + 1) & (uint32_t)(slots - 1);
+        index[slot] = (uint32_t)i + 1;
+    }
+    BOOL *hit = calloc(names.count, sizeof(BOOL));
+    double started = NSProcessInfo.processInfo.systemUptime;
+    NSMutableSet<NSString *> *wanted = [NSMutableSet set];
+    for (NSArray<NSString *> *image in images) if ([image isKindOfClass:NSArray.class] && image.count == 2) [wanted addObject:IKProbePlainPath(image[0])];
+    uint32_t count = _dyld_image_count();
+    BOOL timedOut = NO;
+    for (uint32_t i = 0; i < count && !timedOut; i++) {
+        const char *path = _dyld_get_image_name(i);
+        const struct mach_header *header = _dyld_get_image_header(i);
+        if (!path || !header || header->magic != MH_MAGIC_64 || ![wanted containsObject:IKProbePlainPath(@(path))]) continue;
+        unsigned long size = 0;
+        const uint8_t *bytes = getsectiondata((const struct mach_header_64 *)header, "__TEXT", "__cstring", &size);
+        for (unsigned long at = 0; bytes && at < size;) {
+            if ((at & 0xfffff) < 64 && NSProcessInfo.processInfo.systemUptime - started > seconds) { timedOut = YES; break; }
+            if (!IKProbeAlnum(bytes[at])) { at++; continue; }
+            unsigned long start = at;
+            while (at < size && IKProbeAlnum(bytes[at])) at++;
+            size_t length = at - start;
+            if (length > 63 || !(lengths & (1ull << length))) continue;
+            uint32_t slot = IKProbeHash(bytes + start, length) & (uint32_t)(slots - 1);
+            for (; index[slot]; slot = (slot + 1) & (uint32_t)(slots - 1)) {
+                NSData *name = names[index[slot] - 1];
+                if (name.length == length && !memcmp(name.bytes, bytes + start, length)) { hit[index[slot] - 1] = YES; break; }
+            }
+        }
+    }
+    for (NSUInteger i = 0; i < names.count; i++)
+        if (hit[i]) [found addObject:[[NSString alloc] initWithData:names[i] encoding:NSASCIIStringEncoding]];
+    free(hit);
+    if (complete) *complete = !timedOut;
+    return found;
 }
 
 #pragma mark - Now-playing hook
@@ -226,7 +319,8 @@ static NSURL *IKProbeDirectory;
 static NSString *IKProbeBundle, *IKProbeBundlePath, *IKProbeOwnImage;
 static NSSet<NSString *> *IKProbeFirstNames;
 static NSMutableArray<NSDictionary *> *IKProbeSamples;
-static NSDictionary *IKProbeLastCall;  // title, rate, elapsed, uptime of the previous call; in memory only
+static NSMutableArray<NSDictionary *> *IKProbeRecentCalls;  // title, rate, elapsed, uptime of the last calls; in memory only
+static NSMutableSet<NSString *> *IKProbeNames;               // directory names confirmed in the player's binary
 static BOOL IKProbeFlushPending, IKProbePlaybackSeen;
 static double IKProbePlaybackDelay, IKProbeFlushDelay;
 
@@ -250,10 +344,25 @@ static void IKProbeSample(NSString *trigger) {
             [IKProbeSamples addObject:sample];
             [packet addEntriesFromDictionary:@{@"schema": @1, @"bundleID": IKProbeBundle, @"version": version, @"uptime": @(started),
                 @"wall": @(NSDate.date.timeIntervalSince1970), @"samples": [IKProbeSamples copy], @"appImages": @(images.count)}];
-            NSData *data = [NSPropertyListSerialization dataWithPropertyList:packet format:NSPropertyListBinaryFormat_v1_0 options:0 error:nil];
-            if (data.length && data.length <= IKEvidenceMaxFileBytes)
-                [data writeToURL:[IKProbeDirectory URLByAppendingPathComponent:IKProbeClassesName] options:NSDataWritingAtomic error:nil];
-            IKProbeEndSampling(IKProbeDirectory, trigger);
+            // Directory names in this container that the report would hide, checked against the player's own strings.
+            // The container is two levels above Library/IslandKit.
+            NSURL *container = IKProbeDirectory.URLByDeletingLastPathComponent.URLByDeletingLastPathComponent;
+            IKScanLimits walk = IKDefaultScanLimits();
+            walk.entries = 20000;
+            walk.seconds = 1.5;
+            NSMutableOrderedSet<NSString *> *runs = [NSMutableOrderedSet orderedSet];
+            for (NSString *name in IKContainerDirectoryNames(container, walk)) {
+                [runs addObjectsFromArray:IKMaskedRuns(name)];
+                if (runs.count >= 2000) break;
+            }
+            BOOL complete = YES;
+            [IKProbeNames unionSet:IKProbeConfirmNames(runs.array, images, 1.5, &complete)];
+            NSDictionary *names = @{@"schema": @1, @"bundleID": IKProbeBundle, @"version": version, @"wall": @(NSDate.date.timeIntervalSince1970),
+                                    @"checked": @(runs.count), @"complete": @(complete),
+                                    @"names": [IKProbeNames.allObjects sortedArrayUsingSelector:@selector(compare:)]};
+            [names writeToURL:[IKProbeDirectory URLByAppendingPathComponent:IKProbeNamesName] atomically:YES];
+            // A sample that could not be saved keeps its unfinished mark, so it is retried once more at most.
+            IKProbeSaveSample(IKProbeDirectory, packet, trigger);
         } @catch (__unused id exception) {
         }
     }
@@ -283,8 +392,9 @@ static void IKProbeObserve(NSDictionary *info, double uptime) {
         if (title) call[@"title"] = title;
         if (rate) call[@"rate"] = rate;
         if (elapsed) call[@"elapsed"] = elapsed;
-        BOOL playing = IKProbePlaybackStarted(IKProbeLastCall, call);
-        IKProbeLastCall = call;
+        [IKProbeRecentCalls addObject:call];
+        if (IKProbeRecentCalls.count > 3) [IKProbeRecentCalls removeObjectAtIndex:0];
+        BOOL playing = IKProbePlaybackStarted(IKProbeRecentCalls);
         // A player may publish the next track's title while paused. Only a confirmed start uses up the playback sample.
         if (playing && !IKProbePlaybackSeen) {
             IKProbePlaybackSeen = YES;
@@ -308,6 +418,8 @@ BOOL IKProbeStart(NSString *bundle, NSString *bundlePath, NSURL *directory, doub
     if (dladdr((const void *)&IKProbeStart, &own) && own.dli_fname) IKProbeOwnImage = [NSString stringWithUTF8String:own.dli_fname];
     IKProbeLog = [[IKLyricEventLog alloc] initWithBundle:bundle side:@"player"];
     IKProbeSamples = [NSMutableArray array];
+    IKProbeRecentCalls = [NSMutableArray array];
+    IKProbeNames = [NSMutableSet set];
     IKProbeQueue = dispatch_queue_create("com.islandkit.lyric-probe",
         dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_UTILITY, 0));
     dispatch_async(IKProbeQueue, ^{

@@ -8,6 +8,8 @@
 #define IKProbeEventsName @"lyric-probe-events.plist"
 // Present while a class sample is running. Left behind when the player was killed during one.
 #define IKProbeGuardName @"lyric-probe-sampling.plist"
+// Directory names of this container that the probe found written in the player's own binary.
+#define IKProbeNamesName @"lyric-probe-names.plist"
 // Written by the HUD into IKDataDir, one file per player: prefix + lowercased bundle ID + ".plist".
 #define IKHUDEventsPrefix @"lyric-hud-events-"
 
@@ -34,6 +36,14 @@ NSString *IKRedactPathSegment(NSString *segment);
 NSString *IKRedactFileName(NSString *name, NSString **extension);
 // A path segment inside the app bundle (framework and executable names). Only numbers and IDs are replaced.
 NSString *IKRedactImageSegment(NSString *segment);
+// IKRedactPathSegment, but a run of letters and digits listed in `fixed` is kept as it is. Runs shaped like
+// numbers, hex, UUIDs or IDs are replaced regardless.
+NSString *IKRedactPathSegmentKeeping(NSString *segment, NSSet<NSString *> *fixed);
+// The runs of letters and digits in a directory name that IKRedactPathSegment turns into <word>.
+NSArray<NSString *> *IKMaskedRuns(NSString *segment);
+// Names from the probe's names file that may be shown: letters and digits only, at most 64, for this app.
+// Empty for a missing, malformed or foreign file.
+NSSet<NSString *> *IKProbeConfirmedNames(NSDictionary *packet, NSString *bundle);
 
 typedef struct {
     NSUInteger classes;  // classes listed with members
