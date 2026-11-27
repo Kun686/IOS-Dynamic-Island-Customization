@@ -16,6 +16,7 @@
 + (void)setSystemFrames:(NSArray<NSValue *> *)frames;
 + (NSString *)describeIsland;
 + (BOOL)expandedContentFitsPresentation;
++ (BOOL)expandedRowsVisible;
 // 两行文字各自的宽度、文字宽度、承载文字的 track 此刻（按正在显示的状态）在行内的左右边缘、填色比例
 + (NSString *)describeRows;
 // 屏幕尺寸、系统私有接口给的开孔矩形、IKPrefs 最终采用的开孔

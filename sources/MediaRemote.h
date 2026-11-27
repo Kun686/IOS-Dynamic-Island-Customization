@@ -20,3 +20,5 @@ extern CFStringRef kMRMediaRemoteNowPlayingInfoPlaybackRate;
 
 extern CFStringRef kMRMediaRemoteNowPlayingInfoExternalContentIdentifier;
 extern CFStringRef kMRMediaRemoteNowPlayingInfoUniqueIdentifier;
+extern CFStringRef kMRMediaRemoteNowPlayingInfoQueueIndex;
+extern NSString *kMRMediaRemoteNowPlayingApplicationDidChangeNotification;

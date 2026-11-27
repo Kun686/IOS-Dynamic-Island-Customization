@@ -61,6 +61,8 @@ typedef NS_ENUM(NSInteger, IKState) {
 @property (nonatomic) BOOL outlineOnly;
 // 停掉胶囊和内容层上还在跑的形变、透明度动画（不影响歌词填色和封面旋转）
 - (void)stopAnimations;
+- (void)beginFollowingShell;
+- (void)endFollowingShell;
 - (void)hideContentImmediately;
 // 点击或长按后给一个轻微回弹，确认交互已经被悬浮进程收到。
 - (void)playInteractionPulse;

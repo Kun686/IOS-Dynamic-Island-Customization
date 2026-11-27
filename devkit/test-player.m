@@ -3,6 +3,8 @@
 #import "IKLyricsTimeline.h"
 #import "IKCoverLayout.h"
 #import "IKAvatarProxy.h"
+#import "IKPlaybackDiagnostic.h"
+#import "IKPlaybackDiagnostics.h"
 #import <math.h>
 
 @interface IKPlayerLyrics : NSObject
@@ -39,6 +41,82 @@ static void check(BOOL ok, const char *name) {
 static NSString *lineAt(NSArray<NSDictionary *> *rows, double pos) {
     NSUInteger i = IKCurrentLyricIndex(rows, pos);
     return i == NSNotFound ? nil : rows[i][@"text"];
+}
+
+static void testRecordingUpdates(IKPlayerLyrics *player, NSURL *folder, NSString *bid) {
+    NSMutableDictionary *info = [@{MPMediaItemPropertyTitle:@"歌一", MPMediaItemPropertyArtist:@"歌手",
+        MPMediaItemPropertyPlaybackDuration:@180, MPNowPlayingInfoPropertyElapsedPlaybackTime:@30,
+        MPNowPlayingInfoPropertyPlaybackQueueIndex:@4} mutableCopy];
+    NSURL *rec = [player.file.URLByDeletingLastPathComponent URLByAppendingPathComponent:@"recording.plist"];
+    check([player writeInfo:info bundle:bid], "stream without asset URL starts");
+    NSDictionary *base = [NSDictionary dictionaryWithContentsOfURL:rec];
+    NSString *name = IKRecordingFile(bid,base);
+    check(name.length > 0 && ![base[@"externalID"] length] && ![base[@"persistentID"] length], "metadata binding has no IDs");
+    info[MPMediaItemPropertyTitle] = @"第一句";
+    [player writeInfo:info bundle:bid];
+    info[MPMediaItemPropertyTitle] = @"第二句";
+    [player writeInfo:info bundle:bid];
+    info[MPMediaItemPropertyArtist] = @"第三句";
+    [info removeObjectForKey:MPNowPlayingInfoPropertyElapsedPlaybackTime];
+    [player writeInfo:info bundle:bid];
+    NSDictionary *live = [NSDictionary dictionaryWithContentsOfURL:rec];
+    check([live[@"carLyric"] isEqual:@"第三句"] && [live[@"playSession"] isEqual:base[@"playSession"]], "latest artist wins after two title changes");
+    check([name isEqual:IKRecordingFile(bid,live)], "line changes preserve file name");
+    NSDictionary *raw = IKTrackIdentity(nil,nil,@"第二句",@"第三句",180);
+    IKRecordingTracker *hud = [IKRecordingTracker new];
+    [hud observe:raw album:nil queueIndex:@4 position:@36 bundle:bid];
+    double now = NSProcessInfo.processInfo.systemUptime, wall = NSDate.date.timeIntervalSince1970;
+    NSDictionary *paired = IKLiveRecording(live,bid,raw,@4,nil,now,wall);
+    check([paired[@"title"] isEqual:@"歌一"], "observer starts mid-line and adopts original title");
+    check([IKFreshPlayerLyric(live,hud,raw) isEqual:@"第三句"], "host single cue works without AssetURL or timeline");
+    check(!IKLiveRecording(live,bid,raw,@5,nil,now,wall), "different queue slot rejected");
+    check(!IKLiveRecording(live,@"other",raw,@4,nil,now,wall), "other player's handoff rejected");
+    check(!IKLiveRecording(live,bid,raw,@4,nil,now+11,wall+11), "abandoned handoff expires");
+    check(!IKLiveRecording(live,bid,raw,@4,nil,now,wall+30), "wall / uptime disagreement rejected");
+    NSDictionary *nextRaw = IKTrackIdentity(nil,nil,@"第二句",@"第四句",180);
+    check(!IKLiveRecording(live,bid,nextRaw,@4,nil,now,wall), "unpaired mismatching display fields rejected");
+    [hud observe:nextRaw album:nil queueIndex:nil position:nil bundle:bid];
+    check(!IKFreshPlayerLyric(live,hud,nextRaw), "old host heartbeat cannot rewind a newer system line");
+    check(IKLiveRecording(live,bid,nextRaw,nil,paired[@"playSession"],now,wall) != nil, "paired observers tolerate staggered callbacks");
+    info[MPMediaItemPropertyPersistentID] = @123;
+    [player writeInfo:info bundle:bid];
+    NSDictionary *enriched = [NSDictionary dictionaryWithContentsOfURL:rec];
+    check([IKRecordingFilenames(bid,enriched) containsObject:name] && IKSameRecording(enriched,base), "late ID can still open previous binding");
+    [player writeInfo:@{MPNowPlayingInfoPropertyElapsedPlaybackTime:@49} bundle:bid];
+    live = [NSDictionary dictionaryWithContentsOfURL:rec];
+    check([live[@"carLyric"] isEqual:@"第三句"] && [live[@"queueIndex"] isEqual:@4], "sparse playback sample preserves line and queue");
+    info[MPNowPlayingInfoPropertyPlaybackQueueIndex] = @5;
+    [info removeObjectForKey:MPMediaItemPropertyPersistentID];
+    info[MPMediaItemPropertyTitle] = @"歌二"; info[MPMediaItemPropertyArtist] = @"歌手";
+    [player writeInfo:info bundle:bid];
+    live = [NSDictionary dictionaryWithContentsOfURL:rec];
+    check(![live[@"playSession"] isEqual:base[@"playSession"]] && ![name isEqual:IKRecordingFile(bid,live)], "equal duration next queue item drops old binding");
+    hud = [IKRecordingTracker new];
+    [hud observe:IKTrackIdentity(nil,nil,@"甲",@"同一歌手",180) album:nil queueIndex:nil position:@18 bundle:bid];
+    check(![hud observe:hud.recording album:nil queueIndex:nil position:@1 bundle:bid], "seek alone preserves session");
+    [hud observe:hud.recording album:nil queueIndex:nil position:@51 bundle:bid];
+    check([hud observe:IKTrackIdentity(nil,nil,@"乙",@"同一歌手",180) album:nil queueIndex:nil position:@0 bundle:bid], "different song at playback restart without IDs or queue");
+    check([hud observe:hud.recording album:nil queueIndex:nil position:@1 bundle:@"other"], "changing players starts a new session");
+}
+
+static void testSignals(NSURL *directory, NSURL *asset, NSString *bid) {
+    NSDictionary *info = @{MPMediaItemPropertyTitle:@"sensitive-song",MPMediaItemPropertyPersistentID:@98765432,
+                           MPNowPlayingInfoPropertyAssetURL:asset,@"sensitive-key":@"sensitive-value"};
+    NSDictionary *data = IKPlaybackSignals(info,14,2);
+    NSDictionary *fields = data[@"fields"];
+    check([fields[@"title"] isEqual:@"text"] && [fields[@"persistentID"] isEqual:@"number"], "public key shapes");
+    check([data[@"unknown"] isEqual:@1] && [data[@"asset"] isEqual:@"file"] && [data[@IK_PLAYER_FORMAT] boolValue], "only neighboring file extensions and unknown count");
+    IKWritePlaybackSignals(directory,bid,info,14,2);
+    NSDictionary *packet = [NSDictionary dictionaryWithContentsOfURL:[directory URLByAppendingPathComponent:IKPlaybackDiagnosticsName]];
+    NSString *dump = [packet description];
+    check(packet && ![dump containsString:@"sensitive"] && ![dump containsString:@"98765432"] && ![dump containsString:asset.path], "diagnostic file excludes content, IDs and paths");
+    double now = NSProcessInfo.processInfo.systemUptime, wall = NSDate.date.timeIntervalSince1970;
+    NSString *summary = IKDiagnosticSummary(packet,bid,now,wall);
+    check([summary containsString:@"avAccess=14 avJump=2"] && [summary containsString:@"title/text"], "consumer prints actual observed counters");
+    check(!IKDiagnosticSummary(packet,bid,now+91,wall+91) && !IKDiagnosticSummary(packet,@"wrong",now,wall), "old and foreign diagnostics rejected");
+    NSDictionary *remote = IKPlaybackSignals(@{MPNowPlayingInfoPropertyAssetURL:[NSURL URLWithString:@"https://example.invalid/private"]},0,0);
+    check([remote[@"asset"] isEqual:@"remote"] && !remote[@"qrc"] && ![[remote description] containsString:@"private"], "remote URL shape only");
+    check([IKPlaybackSignals(@{},0,0)[@"asset"] isEqual:@"absent"], "missing asset seen explicitly");
 }
 
 int main(int argc, const char *argv[]) { @autoreleasepool {
@@ -80,6 +158,9 @@ int main(int argc, const char *argv[]) { @autoreleasepool {
     check(!IKPlayerPosition(native,@"player",a,YES,19,109,NULL,NULL), "abandoned anchor expires");
     check(!IKPlayerPosition(native,@"player",a,YES,10.5,190,NULL,NULL), "old boot rejected");
     check(!IKPlayerPosition(native,@"player",b,YES,10.5,100.5,NULL,NULL), "clock from another track rejected");
+    native[@"playSession"] = @"old";
+    NSMutableDictionary *repeated = [a mutableCopy]; repeated[@"playSession"] = @"new";
+    check(!IKPlayerPosition(native,@"player",repeated,YES,10.5,100.5,NULL,NULL), "same song repeated rejects previous session clock");
     native[@"rate"] = @0;
     check(IKPlayerPosition(native,@"player",a,YES,12,102,&exact,NULL) && exact==3, "buffering host freezes playhead");
     IKPlaybackClock *clock = [IKPlaybackClock new];
@@ -130,6 +211,19 @@ int main(int argc, const char *argv[]) { @autoreleasepool {
     [[NSMutableData dataWithLength:IKMaxLyricBytes+1] writeToURL:large atomically:YES];
     check(!IKReadLyricFile(large), "size bound");
 
+    testRecordingUpdates(player,folder,bid);
+    testSignals(folder,audio,bid);
+    NSString *legacy = @"[00:01]歌词";
+    NSStringEncoding gb = CFStringConvertEncodingToNSStringEncoding(kCFStringEncodingGB_18030_2000);
+    for (NSNumber *n in @[@(gb),@(NSUTF8StringEncoding),@(NSUnicodeStringEncoding),@(NSUTF16BigEndianStringEncoding),@(NSUTF16LittleEndianStringEncoding)]) {
+        check([IKDecodeLyricText([legacy dataUsingEncoding:n.unsignedIntegerValue]) isEqual:legacy], "decode legacy lyrics without losing Chinese");
+    }
+    NSArray<NSDictionary *> *breaths = IKParseTimedLyrics(@"[1000,1000]甲\n[3000,1000]乙\n[6200,500]丙",10);
+    check([lineAt(breaths,2.95) isEqual:@"甲"] && [breaths[0][@"end"] doubleValue]==2, "hold completed fill through a short breath");
+    check([lineAt(breaths,3) isEqual:@"乙"] && !lineAt(breaths,4.01) && !lineAt(breaths,7), "long gap and tail clear");
+    NSArray *clear = IKParseTimedLyrics(@"[00:01]甲\n[00:02]\n[00:02.5]乙",10);
+    check(!lineAt(IKNormalizeLyricLines(clear,NO,10),2.3), "explicit short blank survives disk normalization");
+
     StreamProbe *probe = [StreamProbe new];
     probe.output = [[AVPlayerItemMetadataOutput alloc] initWithIdentifiers:@[AVMetadataIdentifierID3MetadataSynchronizedLyric]];
     probe.streamCues = [NSMutableDictionary dictionary];
@@ -157,6 +251,15 @@ int main(int argc, const char *argv[]) { @autoreleasepool {
     check([IKReadProxyImage(proxy,@selector(read:),&error) isEqual:@"decoded"], "resolved concrete image");
     check(!IKReadProxyImage(proxy,@selector(fail:),&error) && error.code==7, "resolver error distinct from timeout");
     check(!IKReadProxyImage(proxy,@selector(wrong:),&error), "reject incompatible resolver ABI");
+    NSMutableDictionary *pending = [NSMutableDictionary dictionary];
+    __block int applied = 0;
+    check(IKAwaitAvatar(pending,@"first",^{ applied = 1; }) == IKAvatarStart, "one proxy starts");
+    check(IKAwaitAvatar(pending,@"first",^{ applied = 2; }) == IKAvatarJoined && pending.count == 1, "one sender and URL share one worker");
+    void (^reply)(void) = pending[@"first"]; reply();
+    check(applied == 2, "coalesced proxy delivers to latest notification");
+    check(IKAwaitAvatar(pending,@"second",^{}) == IKAvatarStart && IKAwaitAvatar(pending,@"third",^{}) == IKAvatarBusy, "two stalled calls bound all work");
+    [pending removeObjectForKey:@"first"];
+    check(IKAwaitAvatar(pending,@"third",^{}) == IKAvatarStart, "worker completion recovers capacity");
     printf("%s: %d checks passed\n", [bid UTF8String], checks);
     return 0;
 } }

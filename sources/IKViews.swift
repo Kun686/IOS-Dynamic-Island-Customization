@@ -288,7 +288,7 @@ struct LyricView: View {
         IKMusicCenter.importTarget { track in
             queryingTrack = false
             guard let track = track else {
-                lyricStatus = "请先在 QQ 音乐或网易云音乐播放一首有曲目信息的歌"
+                lyricStatus = "请打开悬浮窗或播放器联动，再在 QQ 音乐或网易云音乐播放歌曲"
                 target = [:]
                 return
             }
@@ -550,7 +550,10 @@ struct AboutView: View {
         Page(title: "关于") {
             Card {
                 Text("亦辰").font(.system(size: 22, weight: .bold))
-                Caption("开发者 · 灵动岛美化 0.6.1")
+                if let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
+                   let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String {
+                    Caption("灵动岛美化 \(version) (\(build))")
+                }
                 Text("灵动岛美化的作者。使用中遇到问题或有新想法，欢迎通过微信联系。")
                     .font(.system(size: 15))
                     .fixedSize(horizontal: false, vertical: true)

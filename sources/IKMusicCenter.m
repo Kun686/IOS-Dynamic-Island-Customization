@@ -1,5 +1,6 @@
 #import "IKMusicCenter.h"
 #import "MediaRemote.h"
+#import "IKPlaybackDiagnostic.h"
 #import "IKPrefs.h"
 #import <objc/message.h>
 
@@ -23,7 +24,7 @@ static BOOL IKSupportedPlayer(NSString *bid) {
 }
 
 static NSString *IKPlayerLyricsPath(NSString *bundleID) {
-    if (bundleID.length == 0) return nil;
+    if (!IKSupportedPlayer(bundleID)) return nil;
     Class proxyClass = NSClassFromString(@"LSApplicationProxy");
     SEL makeProxy = NSSelectorFromString(@"applicationProxyForIdentifier:");
     SEL containerSelector = NSSelectorFromString(@"dataContainerURL");
@@ -42,16 +43,28 @@ static NSString *IKPlayerLyricsPath(NSString *bundleID) {
     }
 }
 
-static NSURL *IKImportURL(NSString *bid, NSDictionary *track) {
-    NSString *name = IKRecordingFile(bid, track);
-    return name ? [[NSURL fileURLWithPath:[IKDataDir stringByAppendingPathComponent:@"Timelines"] isDirectory:YES]
-                   URLByAppendingPathComponent:name] : nil;
+static NSArray<NSURL *> *IKImportURLs(NSString *bid, NSDictionary *track) {
+    NSURL *directory = [NSURL fileURLWithPath:[IKDataDir stringByAppendingPathComponent:@"Timelines"] isDirectory:YES];
+    NSMutableArray *urls = [NSMutableArray array];
+    for (NSString *name in IKRecordingFilenames(bid, track)) [urls addObject:[directory URLByAppendingPathComponent:name]];
+    return urls;
+}
+
+static NSString *IKAdjacentFile(NSString *playerPath, NSString *name) {
+    return [playerPath.stringByDeletingLastPathComponent stringByAppendingPathComponent:name];
 }
 
 @interface IKMusicCenter ()
 @property(nonatomic, copy) NSString *title, *artist, *album, *mediaApplicationID, *playerPath;
 @property(nonatomic, copy) NSDictionary *recording, *nativeClock;
 - (void)loadPlayerClock;
+- (void)syncRecording:(BOOL)force;
+- (void)logPlayerDiagnostic;
+@property(nonatomic, strong) IKRecordingTracker *tracker;
+@property(nonatomic, copy) NSDictionary *rawTrack, *pairedBase;
+@property(nonatomic, strong) NSNumber *queueIndex;
+@property(nonatomic, copy) NSString *playerLine, *loggedSession, *lastDiagnostic;
+@property(nonatomic) double playerLineExpiry;
 @property(nonatomic, strong) UIImage *artwork;
 @property(nonatomic, strong) NSData *artworkData;
 @property(nonatomic) BOOL isPlaying, lyricsBridgeActive, singleCue;
@@ -68,9 +81,15 @@ static NSURL *IKImportURL(NSString *bid, NSDictionary *track) {
 static void IKLyricsBridgeChanged(CFNotificationCenterRef center, void *observer, CFStringRef name,
                                   const void *object, CFDictionaryRef info) {
     BOOL clockOnly = CFEqual(name,CFSTR(IKClockChangedDarwin));
+    BOOL recording = CFEqual(name,CFSTR(IKRecordingChangedDarwin));
+    BOOL request = CFEqual(name,CFSTR(IKRequestRecordingDarwin));
+    BOOL diagnostic = CFEqual(name,CFSTR(IKPlaybackDiagnosticsNotification));
     dispatch_async(dispatch_get_main_queue(), ^{
         IKMusicCenter *m = [IKMusicCenter shared];
-        if (clockOnly) [m loadPlayerClock];
+        if (diagnostic) { [m logPlayerDiagnostic]; return; }
+        if (request) { [m syncRecording:YES]; return; }
+        if (recording) [m syncRecording:NO];
+        else if (clockOnly) [m loadPlayerClock];
         else m.loadedKey = nil;
         [m refreshLyricsBridge];
         [[NSNotificationCenter defaultCenter] postNotificationName:IKMusicDidChangeNotification object:m];
@@ -82,7 +101,7 @@ static void IKLyricsBridgeChanged(CFNotificationCenterRef center, void *observer
 + (instancetype)shared {
     static IKMusicCenter *music;
     static dispatch_once_t once;
-    dispatch_once(&once, ^{ music = [IKMusicCenter new]; music.clock = [IKPlaybackClock new]; });
+    dispatch_once(&once, ^{ music = [IKMusicCenter new]; music.clock = [IKPlaybackClock new]; music.tracker = [IKRecordingTracker new]; });
     return music;
 }
 
@@ -92,10 +111,16 @@ static void IKLyricsBridgeChanged(CFNotificationCenterRef center, void *observer
                              kMRMediaRemoteNowPlayingApplicationIsPlayingDidChangeNotification]) {
         [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(refresh) name:name object:nil];
     }
+    [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(applicationChanged)
+                                               name:kMRMediaRemoteNowPlayingApplicationDidChangeNotification object:nil];
     CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, IKLyricsBridgeChanged,
                                     CFSTR(IKLyricsChangedDarwin), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
     CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, IKLyricsBridgeChanged,
                                     CFSTR(IKClockChangedDarwin), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
+    CFNotificationCenterRef center = CFNotificationCenterGetDarwinNotifyCenter();
+    for (NSString *name in @[@IKRecordingChangedDarwin, @IKRequestRecordingDarwin, @IKPlaybackDiagnosticsNotification])
+        CFNotificationCenterAddObserver(center, NULL, IKLyricsBridgeChanged, (__bridge CFStringRef)name, NULL,
+                                        CFNotificationSuspensionBehaviorDeliverImmediately);
     [self refresh];
 }
 
@@ -133,6 +158,57 @@ static NSDictionary *IKSnapshot(NSString *path) {
     return [value isKindOfClass:NSDictionary.class] ? value : nil;
 }
 
+- (void)logPlayerDiagnostic {
+    if (!IKSupportedPlayer(self.mediaApplicationID)) return;
+    NSDictionary *packet = IKSnapshot(IKAdjacentFile(self.playerPath,IKPlaybackDiagnosticsName));
+    NSString *summary = IKDiagnosticSummary(packet,self.mediaApplicationID,NSProcessInfo.processInfo.systemUptime,
+                                            NSDate.date.timeIntervalSince1970);
+    if (summary && ![self.lastDiagnostic isEqual:summary]) {
+        self.lastDiagnostic = summary;
+        [IKPrefs log:summary];
+    }
+}
+
+- (void)syncRecording:(BOOL)force {
+    double now = NSProcessInfo.processInfo.systemUptime;
+    NSString *bid = self.mediaApplicationID;
+    NSDictionary *s = IKSupportedPlayer(bid) ? IKSnapshot(IKAdjacentFile(self.playerPath,@"recording.plist")) : nil;
+    NSDictionary *paired = IKLiveRecording(s,bid,self.rawTrack,self.queueIndex,self.pairedBase[@"playSession"],now,NSDate.date.timeIntervalSince1970);
+    if (paired) self.pairedBase = paired;
+    else if (IKConflictingRecordingIDs(self.pairedBase,self.rawTrack)) self.pairedBase = nil;
+    NSDictionary *base = self.pairedBase;
+    if (base) {
+        // Either observer may learn the stable ID after the first lyric.
+        NSMutableDictionary *enriched = nil;
+        for (NSString *key in @[@"externalID",@"persistentID"]) {
+            if (![base[key] length] && [self.tracker.recording[key] length]) {
+                if (!enriched) enriched = [base mutableCopy];
+                enriched[key] = self.tracker.recording[key];
+            }
+        }
+        if (enriched) self.pairedBase = enriched;
+    }
+    self.recording = self.pairedBase ?: self.tracker.recording;
+    self.playerLine = paired ? IKFreshPlayerLyric(s,self.tracker,self.rawTrack) : nil;
+    self.playerLineExpiry = paired ? [s[@"uptime"] doubleValue]+10 : 0;
+    if (IKSupportedPlayer(bid)) {
+        NSURL *file = [NSURL fileURLWithPath:[IKDataDir stringByAppendingPathComponent:@"active-recording.plist"]];
+        [self.tracker writeSnapshotTo:file canonical:self.recording force:force];
+    }
+    NSString *session = self.tracker.recording[@"playSession"];
+    if (bid.length && session && ![session isEqual:self.loggedSession]) {
+        self.loggedSession = session;
+        [IKPrefs log:[NSString stringWithFormat:@"recording app=%@ externalID=%d persistentID=%d queueIndex=%d",
+                      bid, [self.rawTrack[@"externalID"] length]>0, [self.rawTrack[@"persistentID"] length]>0, self.queueIndex!=nil]];
+        [self logPlayerDiagnostic];
+    }
+}
+
+- (NSString *)reportedLyric {
+    return self.playerLine.length && NSProcessInfo.processInfo.systemUptime <= self.playerLineExpiry
+        ? self.playerLine : self.tracker.carLyric;
+}
+
 - (void)loadPlayerClock {
     NSString *path = [self.playerPath.stringByDeletingLastPathComponent stringByAppendingPathComponent:@"clock.plist"];
     self.nativeClock = IKSnapshot(path);
@@ -141,9 +217,11 @@ static NSDictionary *IKSnapshot(NSString *path) {
 - (BOOL)refreshLyricsBridge {
     NSString *bid = self.mediaApplicationID;
     NSDictionary *track = self.recording;
-    NSString *import = IKImportURL(bid, track).path;
+    NSArray<NSURL *> *imports = IKImportURLs(bid,track);
     NSString *legacy = [IKDataDir stringByAppendingPathComponent:@"lyrics.plist"];
-    NSArray *files = @[import ?: @"", self.playerPath ?: @"", legacy];
+    NSMutableArray *files = [NSMutableArray array];
+    for (NSURL *url in imports) [files addObject:url.path];
+    [files addObjectsFromArray:@[self.playerPath ?: @"", legacy]];
     NSMutableArray *key = [NSMutableArray arrayWithObject:bid ?: @""];
     for (NSString *p in files) [key addObject:IKFileStamp(p)];
     BOOL changed = ![key isEqual:self.loadedKey] || (self.loadedTrack != track && !IKSameRecording(self.loadedTrack, track));
@@ -183,7 +261,7 @@ static NSDictionary *IKSnapshot(NSString *path) {
                 self.bridgeLines = rows;
                 self.bridgeTitle = identity[@"title"];
                 [IKPrefs log:[NSString stringWithFormat:@"lyrics timeline app=%@ source=%@ lines=%lu",
-                              bid, i == 0 ? @"import" : (i == 1 ? (IKLyricString(d[@"source"],24) ?: @"player") : @"legacy"), (unsigned long)rows.count]];
+                              bid, i < imports.count ? @"import" : (i == imports.count ? (IKLyricString(d[@"source"],24) ?: @"player") : @"legacy"), (unsigned long)rows.count]];
                 break;
             }
         }
@@ -201,8 +279,8 @@ static NSDictionary *IKSnapshot(NSString *path) {
     if (self.singleCue) self.lyricsBridgeActive = line != nil;
     self.bridgeLyric = line[@"text"];
     double start = [line[@"start"] doubleValue];
-    self.bridgeLyricElapsed = line ? MAX(0,pos-start) : 0;
     self.bridgeLyricDuration = line ? [line[@"end"] doubleValue]-start : 0;
+    self.bridgeLyricElapsed = MIN(self.bridgeLyricDuration, MAX(0,pos-start));
     NSUInteger next = IKNextLyricIndex(self.bridgeLines, pos);
     self.bridgeNextLyric = next < self.bridgeLines.count ? self.bridgeLines[next][@"text"] : nil;
 }
@@ -210,11 +288,11 @@ static NSDictionary *IKSnapshot(NSString *path) {
 - (void)scheduleBoundary {
     [self.boundary invalidate];
     self.boundary = nil;
-    if (!self.lyricsBridgeActive || self.playbackSpeed <= 0) return;
+    if (!self.bridgeLines.count || self.playbackSpeed <= 0) return;
     double pos = [self currentElapsed];
     NSUInteger i = IKCurrentLyricIndex(self.bridgeLines, pos), next = IKNextLyricIndex(self.bridgeLines, pos);
     double boundary;
-    if (i != NSNotFound) boundary = [self.bridgeLines[i][@"end"] doubleValue];
+    if (i != NSNotFound) boundary = [self.bridgeLines[i][@"displayEnd"] doubleValue];
     else if (next < self.bridgeLines.count) boundary = [self.bridgeLines[next][@"start"] doubleValue];
     else return;
     NSTimeInterval delay = MAX(0.001, (boundary-pos)/self.playbackSpeed);
@@ -227,10 +305,21 @@ static NSDictionary *IKSnapshot(NSString *path) {
 }
 
 - (void)applyInfo:(NSDictionary *)info playing:(BOOL)playing {
-    NSDictionary *track = IKSystemTrack(info);
-    BOOL same = IKSameRecording(track, self.recording);
-    // Players with no comparable metadata can still use the ordinary progress display.
-    if (!same && track && !IKSameRecording(track, track)) same = [track isEqual:self.recording];
+    NSDictionary *raw = IKSystemTrack(info);
+    if (!raw && info.count && self.tracker.recording) raw = @{};
+    self.rawTrack = raw;
+    NSNumber *index = info[(__bridge NSString *)kMRMediaRemoteNowPlayingInfoQueueIndex];
+    NSString *album = IKLyricString(info[(__bridge NSString *)kMRMediaRemoteNowPlayingInfoAlbum],512);
+    BOOL boundary = [self.tracker observe:raw album:album queueIndex:index
+                                 position:info[(__bridge NSString *)kMRMediaRemoteNowPlayingInfoElapsedTime]
+                                   bundle:self.mediaApplicationID];
+    if (boundary || index || !raw) self.queueIndex = index;
+    NSDictionary *previousBase = self.pairedBase;
+    if (boundary) self.pairedBase = nil;
+    [self syncRecording:NO];
+    BOOL hostSwitched = previousBase && self.pairedBase &&
+        ![previousBase[@"playSession"] isEqual:self.pairedBase[@"playSession"]] && !IKSameRecording(previousBase,self.pairedBase);
+    BOOL same = !boundary && !hostSwitched;
     id rate = info[(__bridge NSString *)kMRMediaRemoteNowPlayingInfoPlaybackRate];
     id stamp = info[(__bridge NSString *)kMRMediaRemoteNowPlayingInfoTimestamp];
     double now = NSProcessInfo.processInfo.systemUptime;
@@ -239,12 +328,11 @@ static NSDictionary *IKSnapshot(NSString *path) {
                          stamp:[stamp isKindOfClass:NSDate.class] ? stamp : nil playing:playing
                           rate:rate ? [rate doubleValue] : 1 sameTrack:same wall:NSDate.date uptime:now];
     if (self.isPlaying != playing || (same && fabs([self.clock positionAt:now]-previous) > 0.35)) self.systemDiscontinuity = now;
-    self.recording = track;
     self.isPlaying = playing;
-    self.title = track[@"title"];
-    self.artist = track[@"artist"];
-    self.duration = [track[@"duration"] doubleValue];
-    self.album = IKLyricString(info[(__bridge NSString *)kMRMediaRemoteNowPlayingInfoAlbum], 512);
+    self.title = IKLyricString(raw[@"title"],512) ?: self.recording[@"title"];
+    self.artist = IKLyricString(raw[@"artist"],512) ?: self.recording[@"artist"];
+    self.duration = [self.recording[@"duration"] doubleValue];
+    self.album = album ?: (same ? self.album : nil);
     NSData *art = info[(__bridge NSString *)kMRMediaRemoteNowPlayingInfoArtworkData];
     if ([art isKindOfClass:NSData.class] && art.length) {
         if (![art isEqual:self.artworkData]) { self.artworkData = art; self.artwork = [UIImage imageWithData:art]; }
@@ -253,21 +341,42 @@ static NSDictionary *IKSnapshot(NSString *path) {
     [NSNotificationCenter.defaultCenter postNotificationName:IKMusicDidChangeNotification object:self];
 }
 
+- (void)clearPlayerScope {
+    [self.tracker observe:nil album:nil queueIndex:nil position:nil bundle:nil];
+    self.mediaApplicationID = nil;
+    self.playerPath = nil;
+    self.pairedBase = nil;
+    self.playerLine = nil;
+    self.rawTrack = nil;
+    self.recording = nil;
+    self.nativeClock = nil;
+    self.queueIndex = nil;
+    self.loadedKey = nil;
+    self.clock = [IKPlaybackClock new];
+    self.artwork = nil;
+    self.artworkData = nil;
+    self.album = nil;
+    self.lastDiagnostic = nil;
+}
+
+- (void)applicationChanged {
+    [self clearPlayerScope];
+    [self refresh];
+}
+
 - (void)refresh {
     NSUInteger gen = ++self.generation;
     dispatch_queue_t main = dispatch_get_main_queue();
     __block NSDictionary *info;
     __block NSNumber *playing;
-    __block BOOL receivedID = NO;
     MRMediaRemoteGetNowPlayingApplicationDisplayID(main, ^(NSString *bid) {
         if (gen != self.generation) return;
-        receivedID = YES;
-        if (![self.mediaApplicationID isEqual:bid] || !self.playerPath) {
-            self.mediaApplicationID = [bid isKindOfClass:NSString.class] ? bid : nil;
-            self.playerPath = IKPlayerLyricsPath(self.mediaApplicationID);
-        }
-        if (info && [self refreshLyricsBridge])
-            [NSNotificationCenter.defaultCenter postNotificationName:IKMusicDidChangeNotification object:self];
+        BOOL switched = self.mediaApplicationID && ![self.mediaApplicationID isEqual:bid];
+        if (switched) [self clearPlayerScope];
+        BOOL newScope = switched || ![(self.mediaApplicationID ?: @"") isEqual:(bid ?: @"")];
+        self.mediaApplicationID = [bid isKindOfClass:NSString.class] ? bid : nil;
+        if (newScope || !self.playerPath) self.playerPath = IKPlayerLyricsPath(self.mediaApplicationID);
+        if (info && newScope) [self applyInfo:info playing:playing ? playing.boolValue : self.isPlaying];
     });
     MRMediaRemoteGetNowPlayingApplicationIsPlaying(main, ^(Boolean value) {
         if (gen != self.generation) return;
@@ -277,13 +386,38 @@ static NSDictionary *IKSnapshot(NSString *path) {
     MRMediaRemoteGetNowPlayingInfo(main, ^(CFDictionaryRef result) {
         if (gen != self.generation) return;
         info = [(__bridge NSDictionary *)result copy] ?: @{};
-        if (!receivedID && !IKSameRecording(IKSystemTrack(info), self.recording)) {
-            self.mediaApplicationID = nil;
-            self.playerPath = nil;
-        }
         id rate = info[(__bridge NSString *)kMRMediaRemoteNowPlayingInfoPlaybackRate];
         [self applyInfo:info playing:playing ? playing.boolValue : (rate ? [rate doubleValue]>0 : self.isPlaying)];
     });
+}
+
+static NSDictionary *IKImportTarget(NSString *bid, NSDictionary *info) {
+    NSDictionary *raw = IKSystemTrack(info);
+    NSString *playerPath = IKPlayerLyricsPath(bid);
+    NSArray *paths = @[[IKDataDir stringByAppendingPathComponent:@"active-recording.plist"], IKAdjacentFile(playerPath,@"recording.plist") ?: @""];
+    NSDictionary *base = nil;
+    for (NSString *p in paths) {
+        base = IKLiveRecording(IKSnapshot(p),bid,raw,info[(__bridge NSString *)kMRMediaRemoteNowPlayingInfoQueueIndex],
+                               nil,NSProcessInfo.processInfo.systemUptime,NSDate.date.timeIntervalSince1970);
+        if (base) break;
+    }
+    if (!base && ([raw[@"externalID"] length] || [raw[@"persistentID"] length])) base = raw;
+    NSMutableDictionary *target = [base mutableCopy];
+    if (!IKRecordingFile(bid,target)) return nil;
+    target[@"bundleID"] = bid;
+    NSDictionary *packet = IKSnapshot(playerPath);
+    BOOL paired = [packet[@"bundleID"] isEqual:bid] && IKSameRecording(packet,target);
+    BOOL hasLines = paired && [packet[@"lines"] isKindOfClass:NSArray.class] && [packet[@"lines"] count];
+    NSDictionary *live = IKSnapshot(IKAdjacentFile(playerPath,@"recording.plist"));
+    BOOL sameLive = IKLiveRecording(live,bid,raw,info[(__bridge NSString *)kMRMediaRemoteNowPlayingInfoQueueIndex],
+                                    nil,NSProcessInfo.processInfo.systemUptime,NSDate.date.timeIntervalSince1970) != nil;
+    if (hasLines) target[@"mode"] = @"播放器时间轴";
+    else if (sameLive && IKLyricString(live[@"carLyric"],512)) target[@"mode"] = @"播放器单句（无时间标签）";
+    else target[@"mode"] = sameLive ? @"播放器已连接，当前曲目未提供时间轴" : @"系统播放信息";
+    for (NSURL *url in IKImportURLs(bid,target)) {
+        if (IKSameRecording(target,IKSnapshot(url.path))) { target[@"mode"] = @"已绑定本地时间轴"; break; }
+    }
+    return target;
 }
 
 + (void)requestImportTarget:(void (^)(NSDictionary *))completion {
@@ -292,32 +426,33 @@ static NSDictionary *IKSnapshot(NSString *path) {
     void (^finish)(NSDictionary *) = ^(NSDictionary *target) {
         if (!finished) { finished = YES; completion(target); }
     };
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2*NSEC_PER_SEC), main, ^{ finish(nil); });
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,2*NSEC_PER_SEC),main,^{ finish(nil); });
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),CFSTR(IKRequestRecordingDarwin),NULL,NULL,true);
     MRMediaRemoteGetNowPlayingApplicationDisplayID(main, ^(NSString *bid) {
         if (finished || !IKSupportedPlayer(bid)) { finish(nil); return; }
-        MRMediaRemoteGetNowPlayingInfo(main, ^(CFDictionaryRef result) {
-            NSMutableDictionary *target = [IKSystemTrack((__bridge NSDictionary *)result) mutableCopy];
-            target[@"bundleID"] = bid;
-            if (!IKRecordingFile(bid,target)) { finish(nil); return; }
-            NSDictionary *snapshot = IKSnapshot(IKPlayerLyricsPath(bid));
-            BOOL paired = [snapshot[@"bundleID"] isEqual:bid] && IKSameRecording(snapshot, target);
-            if ([NSFileManager.defaultManager fileExistsAtPath:IKImportURL(bid,target).path]) target[@"mode"] = @"已绑定本地时间轴";
-            else if (paired && [snapshot[@"lines"] count]) target[@"mode"] = @"播放器时间轴";
-            else target[@"mode"] = paired ? @"播放器已连接，当前曲目未提供时间轴" : @"系统播放信息";
-            MRMediaRemoteGetNowPlayingApplicationDisplayID(main, ^(NSString *current) {
-                finish([bid isEqual:current] ? target : nil);
+        void (^readTarget)(BOOL) = ^(BOOL last) {
+            if (finished) return;
+            MRMediaRemoteGetNowPlayingInfo(main, ^(CFDictionaryRef result) {
+                if (finished) return;
+                NSDictionary *target = IKImportTarget(bid,(__bridge NSDictionary *)result);
+                if (!target && !last) return;
+                MRMediaRemoteGetNowPlayingApplicationDisplayID(main, ^(NSString *current) {
+                    finish([bid isEqual:current] ? target : nil);
+                });
             });
-        });
+        };
+        readTarget(NO);
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,600*NSEC_PER_MSEC),main,^{ readTarget(YES); });
     });
 }
 
 + (NSString *)importLyricsAtURL:(NSURL *)url target:(NSDictionary *)target {
-    NSURL *dest = IKImportURL(target[@"bundleID"], target);
+    NSURL *dest = IKImportURLs(target[@"bundleID"],target).firstObject;
     if (!dest || !IKSupportedPlayer(target[@"bundleID"])) return @"未识别当前歌曲";
     NSData *bytes = IKReadLyricFile(url);
     if (!bytes) return @"文件读不到或超过 512 KB";
-    NSString *text = [[NSString alloc] initWithData:bytes encoding:NSUTF8StringEncoding];
-    if (!text) text = [[NSString alloc] initWithData:bytes encoding:NSUnicodeStringEncoding];
+    NSString *text = IKDecodeLyricText(bytes);
+    if (!text) return @"无法读取歌词编码，请选择 UTF-8、UTF-16 或 GBK 系列的文本文件";
     NSArray *lines = IKParseTimedLyrics(text, [target[@"duration"] doubleValue]);
     if (!lines.count) return @"文件里没有可用的时间标签，请选明文 LRC、QRC 或 YRC";
     NSMutableDictionary *d = [target mutableCopy];
@@ -331,11 +466,14 @@ static NSDictionary *IKSnapshot(NSString *path) {
     return nil;
 }
 + (NSString *)removeImport:(NSDictionary *)target {
-    NSURL *url = IKImportURL(target[@"bundleID"], target);
-    if (!url || !IKSupportedPlayer(target[@"bundleID"])) return @"未识别当前歌曲";
-    NSError *error = nil;
-    if (![NSFileManager.defaultManager removeItemAtURL:url error:&error] && error.code != NSFileNoSuchFileError)
-        return @"歌词未能移除";
+    NSArray *urls = IKImportURLs(target[@"bundleID"],target);
+    if (!urls.count || !IKSupportedPlayer(target[@"bundleID"])) return @"未识别当前歌曲";
+    for (NSURL *url in urls) {
+        if (!IKSameRecording(target,IKSnapshot(url.path))) continue;
+        NSError *error = nil;
+        if (![NSFileManager.defaultManager removeItemAtURL:url error:&error] && error.code != NSFileNoSuchFileError)
+            return @"歌词未能移除";
+    }
     CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR(IKLyricsChangedDarwin), NULL, NULL, true);
     return nil;
 }

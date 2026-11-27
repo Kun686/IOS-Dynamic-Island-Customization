@@ -94,6 +94,13 @@ final class HarnessAppDelegate: UIResponder, UIApplicationDelegate {
             }
             at(0.61, "refresh during retraction") { ctl.refresh() }
             at(1.9, "end notification") { ctl.perform(NSSelectorFromString("dismissNotification")) }
+            at(3.8, "width change while lyrics fit") {
+                let prefs = IKPrefs.shared()!
+                let sw = UIScreen.main.bounds.width
+                let f = CGRect(x: 9, y: prefs.islandTop, width: sw - 18, height: prefs.cutoutHeight)
+                HarnessHUD.setSystemFrames([NSValue(cgRect: f)])
+            }
+            at(3.95, "text remains visible during resize") { precondition(HarnessHUD.expandedRowsVisible()) }
             at(4.5, "check") {
                 sampler.invalidate()
                 precondition(clipped == 0, "clipped content in \(clipped) frames")

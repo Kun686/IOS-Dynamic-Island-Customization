@@ -19,3 +19,13 @@ static inline id IKReadProxyImage(id proxy, SEL selector, NSError *__autoreleasi
         return nil;
     }
 }
+
+typedef NS_ENUM(NSInteger, IKAvatarAdmission) { IKAvatarStart, IKAvatarJoined, IKAvatarBusy };
+
+// Called on the main queue. A service call owns its slot until it returns.
+static inline IKAvatarAdmission IKAwaitAvatar(NSMutableDictionary *pending, id<NSCopying> key, id completion) {
+    BOOL exists = pending[key] != nil;
+    if (!exists && pending.count >= 2) return IKAvatarBusy;
+    pending[key] = [completion copy];
+    return exists ? IKAvatarJoined : IKAvatarStart;
+}

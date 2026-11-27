@@ -33,6 +33,7 @@ extern NSString *const IKMusicDidChangeNotification;
 
 @property (nonatomic, readonly) double playbackSpeed;
 @property (nonatomic, readonly, copy) NSDictionary *recording;
+@property (nonatomic, readonly, copy) NSString *reportedLyric;
 + (void)requestImportTarget:(void (^)(NSDictionary *target))completion NS_SWIFT_NAME(importTarget(completion:));
 + (NSString *)importLyricsAtURL:(NSURL *)url target:(NSDictionary *)target NS_SWIFT_NAME(importLyrics(at:target:));
 

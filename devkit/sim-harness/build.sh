@@ -12,7 +12,7 @@ EXTRA_S="${IK_OLD:+-DIK_OLD}"
 rm -rf "$OUT" && mkdir -p "$OUT/IKHarness.app"
 TARGET=arm64-apple-ios16.0-simulator
 CFLAGS="-target $TARGET -fobjc-arc -fmodules -O0 -g -I$SRC/sources -I$SRC/headers -I$SRC/supports -I$HERE -include $SRC/supports/hudapp-prefix.pch -Wno-deprecated-declarations $EXTRA_C"
-for f in "$SRC/sources/IKIslandView.m" "$SRC/sources/IKPrefs.m" "$SRC/sources/IKController.m" "$HERE/HarnessStubs.m"; do
+for f in "$SRC/sources/IKIslandView.m" "$SRC/sources/IKPrefs.m" "$SRC/sources/IKLyricsTimeline.m" "$SRC/sources/IKController.m" "$HERE/HarnessStubs.m"; do
   xcrun -sdk iphonesimulator clang $CFLAGS -c "$f" -o "$OUT/$(basename "$f").o"
 done
 xcrun -sdk iphonesimulator swiftc -target $TARGET -parse-as-library -Onone $EXTRA_S -module-name IKHarness \

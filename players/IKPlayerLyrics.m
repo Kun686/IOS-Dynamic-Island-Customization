@@ -1,6 +1,7 @@
 #import <AVFoundation/AVFoundation.h>
 #import <MediaPlayer/MediaPlayer.h>
 #import "IKLyricsTimeline.h"
+#import "IKPlaybackDiagnostics.h"
 
 // Runs inside the player. Read its own published playback metadata and local asset only.
 static NSArray *IKAssetLyrics(NSURL *url, double duration) {
@@ -25,7 +26,7 @@ static NSArray *IKPlayerLines(NSString *published, NSURL *assetURL, double durat
         NSURL *stem = assetURL.URLByDeletingPathExtension;
         for (NSString *ext in @[@IK_PLAYER_FORMAT, @"lrc"]) {
             NSData *d = IKReadLyricFile([stem URLByAppendingPathExtension:ext]);
-            NSString *s = d ? [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding] : nil;
+            NSString *s = d ? IKDecodeLyricText(d) : nil;
             lines = IKParseTimedLyrics(s, duration);
             if (lines.count) { *source = @"sidecar"; return lines; }
         }
@@ -48,6 +49,9 @@ static NSArray *IKPlayerLines(NSString *published, NSURL *assetURL, double durat
 @property(nonatomic, copy) NSDictionary *lastClock;
 @property(nonatomic) BOOL clearedClock;
 @property(nonatomic, copy) NSDictionary *lastTrack;
+@property(nonatomic, strong) IKRecordingTracker *tracker;
+@property(nonatomic) BOOL publishedRecording;
+@property(nonatomic) NSUInteger accessEvents, jumpEvents;
 @property(nonatomic, strong) NSURL *file;
 @property(nonatomic, strong) dispatch_source_t timer;
 @end
@@ -100,8 +104,14 @@ static NSArray *IKPlayerLines(NSString *published, NSURL *assetURL, double durat
     NSDictionary *track = IKTrackIdentity(info[MPNowPlayingInfoPropertyExternalContentIdentifier],
         info[MPMediaItemPropertyPersistentID], info[MPMediaItemPropertyTitle], info[MPMediaItemPropertyArtist],
         [info[MPMediaItemPropertyPlaybackDuration] doubleValue]);
-    // A car-lyrics field may alternate between the song title and a lyric.
-    if (IKSameRecording(track, self.lastTrack) && [self.lastTrack[@"title"] length]) track = self.lastTrack;
+    if (!self.tracker) self.tracker = [IKRecordingTracker new];
+    if (!track && info.count && self.tracker.recording) track = @{};
+    [self.tracker observe:track album:IKLyricString(info[MPMediaItemPropertyAlbumTitle],512)
+               queueIndex:info[MPNowPlayingInfoPropertyPlaybackQueueIndex]
+                 position:info[MPNowPlayingInfoPropertyElapsedPlaybackTime] bundle:bundle];
+    track = self.tracker.recording;
+    NSURL *identityFile = [self.file.URLByDeletingLastPathComponent URLByAppendingPathComponent:@"recording.plist"];
+    self.publishedRecording = [self.tracker writeSnapshotTo:identityFile canonical:nil force:NO];
     id candidate = info[MPNowPlayingInfoPropertyAssetURL] ?: info[MPMediaItemPropertyAssetURL];
     NSURL *assetURL = [candidate isKindOfClass:NSURL.class] ? candidate : nil;
     AVPlayerItem *item = self.candidate;
@@ -175,9 +185,13 @@ static NSArray *IKPlayerLines(NSString *published, NSURL *assetURL, double durat
 
 - (void)publish {
     NSString *bundle = NSBundle.mainBundle.bundleIdentifier;
-    if ([self writeInfo:MPNowPlayingInfoCenter.defaultCenter.nowPlayingInfo bundle:bundle]) {
+    NSDictionary *info = MPNowPlayingInfoCenter.defaultCenter.nowPlayingInfo;
+    IKWritePlaybackSignals(self.file.URLByDeletingLastPathComponent,bundle,info,self.accessEvents,self.jumpEvents);
+    if ([self writeInfo:info bundle:bundle]) {
         CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR(IKLyricsChangedDarwin), NULL, NULL, true);
     }
+    if (self.publishedRecording)
+        CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR(IKRecordingChangedDarwin), NULL, NULL, true);
     [self publishClockForBundle:bundle];
 }
 
@@ -189,7 +203,12 @@ static NSArray *IKPlayerLines(NSString *published, NSURL *assetURL, double durat
     for (NSNotificationName name in @[AVPlayerItemNewAccessLogEntryNotification, AVPlayerItemTimeJumpedNotification]) {
         [NSNotificationCenter.defaultCenter addObserverForName:name object:nil queue:nil usingBlock:^(NSNotification *note) {
             if (![note.object isKindOfClass:AVPlayerItem.class]) return;
-            dispatch_async(q, ^{ self.candidate = note.object; [self publish]; });
+            dispatch_async(q, ^{
+                if ([note.name isEqual:AVPlayerItemTimeJumpedNotification]) self.jumpEvents++;
+                else self.accessEvents++;
+                self.candidate = note.object;
+                [self publish];
+            });
         }];
     }
     self.timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, q);

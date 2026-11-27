@@ -16,6 +16,7 @@ NSString *const IKMusicDidChangeNotification = @"IKMusicDidChangeNotification";
 @property (nonatomic) BOOL isPlaying;
 @property (nonatomic) double duration;
 @property (nonatomic) double startedAt;
+@property (nonatomic, strong) IKRecordingTracker *tracker;
 @end
 
 @implementation IKMusicCenter
@@ -27,10 +28,15 @@ NSString *const IKMusicDidChangeNotification = @"IKMusicDidChangeNotification";
 + (void)requestImportTarget:(void (^)(NSDictionary *))completion { completion(nil); }
 + (NSString *)importLyricsAtURL:(NSURL *)url target:(NSDictionary *)target { return @"测试桩没有播放器"; }
 + (NSString *)removeImport:(NSDictionary *)target { return @"测试桩没有播放器"; }
+- (NSDictionary *)recording { return self.tracker.recording; }
+- (NSString *)reportedLyric { return self.tracker.carLyric; }
 - (BOOL)hasTrack { return self.title.length > 0; }
 - (double)currentElapsed { return self.isPlaying ? CFAbsoluteTimeGetCurrent() - self.startedAt + 60 : 60; }
 - (void)h_setTitle:(NSString *)title artist:(NSString *)artist album:(NSString *)album duration:(double)duration playing:(BOOL)playing {
     if (self.startedAt == 0) self.startedAt = CFAbsoluteTimeGetCurrent();
+    if (!self.tracker) self.tracker = [IKRecordingTracker new];
+    [self.tracker observe:IKTrackIdentity(nil,nil,title,artist,duration) album:album queueIndex:nil
+                 position:@([self currentElapsed]) bundle:@"harness"];
     self.title = title; self.artist = artist; self.album = album; self.duration = duration; self.isPlaying = playing;
     [[NSNotificationCenter defaultCenter] postNotificationName:IKMusicDidChangeNotification object:self];
 }
@@ -158,9 +164,16 @@ static void HarnessReload(IKPrefs *self, SEL _cmd) {
     UIView *content = [v valueForKey:@"content"];
     CALayer *shell = v.layer.presentationLayer ?: v.layer;
     CALayer *shown = content.layer.presentationLayer ?: content.layer;
-    if (content.hidden || shell.opacity * shown.opacity < 0.05) return YES;
+    UIView *row = [v valueForKey:@"row1"];
+    if (row.hidden || content.hidden || shell.opacity * shown.opacity < 0.05) return YES;
     return IKCoverRows(shell.bounds.size, v.cutoutBand, v.state == IKStateNotif ? 70 : 76,
                        v.state == IKStateNotif || v.lyricLines >= 2).fits;
+}
+
++ (BOOL)expandedRowsVisible {
+    IKIslandView *v = [[IKController shared] valueForKey:@"island"];
+    UIView *row = [v valueForKey:@"row1"], *content = [v valueForKey:@"content"];
+    return !row.hidden && !content.hidden && (content.layer.presentationLayer ?: content.layer).opacity > 0.5;
 }
 
 + (NSString *)describeIsland {

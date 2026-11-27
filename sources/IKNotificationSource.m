@@ -364,7 +364,7 @@ static void IKFetchIntentsImage(id image, void (^reply)(UIImage *)) {
     @catch (__unused NSException *e) { reply(nil); }
 }
 
-static void IKResolveSenderImage(id suppliedImage, NSURL *url, void (^reply)(UIImage *, NSString *)) {
+static void IKResolveSenderImage(id suppliedImage, NSURL *url, NSArray *senderKey, void (^reply)(UIImage *, NSString *)) {
     UIImage *local = IKImageFromRemoteURL(url);
     if (local) { reply(local, @"local"); return; }
     if (!suppliedImage && ![url.scheme.lowercaseString isEqual:@"intents-remote-image-proxy"]) return;
@@ -397,10 +397,27 @@ static void IKResolveSenderImage(id suppliedImage, NSURL *url, void (^reply)(UII
         if (delivered) return;
         SEL resolve = NSSelectorFromString(@"_proxiedImageWithError:");
         if (!IKCanResolveProxy(proxy, resolve)) { proxyDone = YES; IKNotifLog(@"头像阶段 resolve=unavailable"); return; }
-        static dispatch_semaphore_t slots;
-        static dispatch_once_t once;
-        dispatch_once(&once, ^{ slots = dispatch_semaphore_create(2); });
-        if (dispatch_semaphore_wait(slots, DISPATCH_TIME_NOW)) { proxyDone = YES; IKNotifLog(@"头像阶段 resolve=busy"); return; }
+        // The main queue owns the two real outstanding service calls. A UI timeout cannot release one.
+        typedef void (^ResultHandler)(id, UIImage *, NSError *, BOOL);
+        static NSMutableDictionary<id<NSCopying>,ResultHandler> *pending;
+        if (!pending) pending = [NSMutableDictionary dictionary];
+        id<NSCopying> key = senderKey && url ? (id)@[senderKey,url] : (id)NSUUID.UUID;
+        ResultHandler replyToLatest = ^(id result, UIImage *concrete, NSError *error, BOOL sameProxy) {
+            if (delivered) return;
+            if (error || !result || sameProxy) {
+                proxyDone = YES;
+                IKNotifLog(@"头像阶段 resolve=%@ domain=%@ code=%ld",
+                           error ? @"error" : (sameProxy ? @"sameProxy" : @"empty"), error.domain ?: @"-", (long)error.code);
+            } else if (concrete) finish(concrete, @"resolvedData");
+            else IKFetchIntentsImage(result, ^(UIImage *decoded) { finish(decoded, @"resolvedFetch"); });
+        };
+        IKAvatarAdmission admission = IKAwaitAvatar(pending,key,replyToLatest);
+        if (admission == IKAvatarJoined) { IKNotifLog(@"头像阶段 resolve=joined"); return; }
+        if (admission == IKAvatarBusy) {
+            proxyDone = YES;
+            IKNotifLog(@"头像阶段 resolve=busy publicOnly=1");
+            return;
+        }
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY,0), ^{
             NSError *error = nil;
             id result = IKReadProxyImage(proxy, resolve, &error);
@@ -414,17 +431,11 @@ static void IKResolveSenderImage(id suppliedImage, NSURL *url, void (^reply)(UII
                         concrete = [UIImage imageWithData:data];
                 }
             }
-            dispatch_semaphore_signal(slots);
+            BOOL sameProxy = result == proxy;
             dispatch_async(dispatch_get_main_queue(), ^{
-                if (delivered) return;
-                if (error || !result || result == proxy) {
-                    proxyDone = YES;
-                    IKNotifLog(@"头像阶段 resolve=%@ domain=%@ code=%ld",
-                               error ? @"error" : (result ? @"sameProxy" : @"empty"), error.domain ?: @"-", (long)error.code);
-                    return;
-                }
-                if (concrete) finish(concrete, @"resolvedData");
-                else IKFetchIntentsImage(result, ^(UIImage *decoded) { finish(decoded, @"resolvedFetch"); });
+                ResultHandler handler = pending[key];
+                [pending removeObjectForKey:key];
+                if (handler) handler(result,concrete,error,sameProxy);
             });
         });
     });
@@ -708,7 +719,7 @@ static UIImage *IKFindImageEnhanced(id obj, NSInteger depth) {
             id original = IKSenderIntentImage(bulletin);
             if (remoteURL || original) {
                 IKNotifLog(@"头像阶段 request=%@ original=%d scheme=%@", bundleID, original != nil, remoteURL.scheme ?: @"-");
-                IKResolveSenderImage(original, remoteURL, ^(UIImage *resolved, NSString *source) {
+                IKResolveSenderImage(original, remoteURL, senderKey, ^(UIImage *resolved, NSString *source) {
                     if (senderKey) [IKAvatarCache() setObject:resolved forKey:senderKey
                         cost:(resolved.CGImage ? CGImageGetBytesPerRow(resolved.CGImage) * CGImageGetHeight(resolved.CGImage) : 65536)];
                     BOOL applied = [ctl updateNotificationAvatar:resolved forBundle:bundleID

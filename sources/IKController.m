@@ -97,20 +97,8 @@ NSString *const IKSystemIslandDidChangeNotification = @"IKSystemIslandDidChangeN
 @property (nonatomic) CFAbsoluteTime pausedAt;          // 暂停的时刻，没在暂停时为 0。暂停期间歌词的进度不往前走
 @property (nonatomic) BOOL wasPlaying;
 
-// 歌词直接来自系统“正在播放”信息：有的播放器会把当前这句歌词写进标题、歌手或专辑字段。
-// 同一首歌（时长不变）期间哪个字段在变，哪个就是歌词
-@property (nonatomic) double trackDuration;
-@property (nonatomic, copy) NSDictionary *lastRecording;
-@property (nonatomic, copy) NSString *lastTitle;
-@property (nonatomic, copy) NSString *lastArtist;
-@property (nonatomic, copy) NSString *lastAlbum;
-@property (nonatomic, copy) NSString *trackTitleBaseline;
-@property (nonatomic, copy) NSString *trackArtistBaseline;
-@property (nonatomic, copy) NSString *trackAlbumBaseline;
-@property (nonatomic) NSInteger titleChanges;
-@property (nonatomic) NSInteger artistChanges;
-@property (nonatomic) NSInteger albumChanges;
-@property (nonatomic) NSInteger lyricField;             // 0 未发现；1 标题；2 歌手；3 专辑
+@property (nonatomic, copy) NSString *lastSession;
+@property (nonatomic, copy) NSString *lastLyric;
 @property (nonatomic) CFAbsoluteTime lyricChangedAt;
 @property (nonatomic) double lyricInterval;             // 最近几句的平均间隔，用来估计填色时长
 @property (nonatomic, strong) NSTimer *lyricTimer;
@@ -221,101 +209,42 @@ static void IKDemoRequested(CFNotificationCenterRef c, void *o, CFStringRef n, c
     [self update];
 }
 
-static BOOL IKSame(NSString *a, NSString *b) {
-    return [(a ?: @"") isEqualToString:(b ?: @"")];
-}
-
-// 找出哪个字段在承载歌词
 - (void)trackLyricFields {
-    IKMusicCenter *m = [IKMusicCenter shared];
-    if (m.lyricsBridgeActive) {
-        // 注入插件已经提供了带时间轴的歌词，不能再从歌名、歌手和专辑的变化猜测顺序。
-        self.lyricField = 0;
-        return;
-    }
-    BOOL sameTrack = m.duration > 0 && self.trackDuration > 0 && fabs(m.duration - self.trackDuration) < 1.5;
-    NSDictionary *recording = m.recording;
-    for (NSString *key in @[@"externalID", @"persistentID"]) {
-        if ([recording[key] length] && [self.lastRecording[key] length] &&
-            ![recording[key] isEqual:self.lastRecording[key]]) sameTrack = NO;
-    }
-    self.lastRecording = recording;
-    if (!sameTrack) {
-        // 换歌了：重新观察
-        self.trackDuration = m.duration;
-        self.trackTitleBaseline = m.title;
-        self.trackArtistBaseline = m.artist;
-        self.trackAlbumBaseline = m.album;
-        self.titleChanges = self.artistChanges = self.albumChanges = 0;
-        self.lyricField = 0;
-        self.lyricInterval = 0;
-        self.lyricChangedAt = CFAbsoluteTimeGetCurrent();
-        if (self.pausedAt > 0) self.pausedAt = self.lyricChangedAt;
-        [IKPrefs log:[NSString stringWithFormat:@"track duration=%.0f title.len=%lu artist.len=%lu album.len=%lu",
-                      m.duration, (unsigned long)m.title.length, (unsigned long)m.artist.length, (unsigned long)m.album.length]];
-    } else {
-        BOOL t = !IKSame(m.title, self.lastTitle), a = !IKSame(m.artist, self.lastArtist), al = !IKSame(m.album, self.lastAlbum);
-        if (t) self.titleChanges++;
-        if (a) self.artistChanges++;
-        if (al) self.albumChanges++;
-
-        // 只选择已经偏离本首歌初始元数据、并且变化次数最多的字段。
-        // 这样标题、歌手或专辑中的系统歌词一出现就能切换，不再等待第二次变化。
-        NSInteger field = self.lyricField;
-        NSInteger bestChanges = 0;
-        if (!IKSame(m.title, self.trackTitleBaseline) && self.titleChanges > bestChanges) {
-            field = 1; bestChanges = self.titleChanges;
-        }
-        if (!IKSame(m.artist, self.trackArtistBaseline) && self.artistChanges > bestChanges) {
-            field = 2; bestChanges = self.artistChanges;
-        }
-        if (!IKSame(m.album, self.trackAlbumBaseline) && self.albumChanges > bestChanges) {
-            field = 3; bestChanges = self.albumChanges;
-        }
-        if (field != self.lyricField) {
-            self.lyricField = field;
-            [IKPrefs log:[NSString stringWithFormat:@"lyric field=%ld (1 title, 2 artist, 3 album)", (long)field]];
-        }
-
-        BOOL lyricChanged = (field == 1 && t) || (field == 2 && a) || (field == 3 && al);
-        if (lyricChanged) {
-            CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-            double gap = now - self.lyricChangedAt;
-            if (gap > 0.5 && gap < 15) self.lyricInterval = self.lyricInterval > 0 ? self.lyricInterval * 0.6 + gap * 0.4 : gap;
-            self.lyricChangedAt = now;
-        }
-    }
-    self.lastTitle = m.title;
-    self.lastArtist = m.artist;
-    self.lastAlbum = m.album;
+    IKMusicCenter *music = [IKMusicCenter shared];
+    NSString *session = music.recording[@"playSession"];
+    NSString *line = music.reportedLyric;
+    BOOL newTrack = ![(session ?: @"") isEqual:(self.lastSession ?: @"")];
+    if (!newTrack && [(line ?: @"") isEqual:(self.lastLyric ?: @"")]) return;
+    CFAbsoluteTime now = self.pausedAt > 0 ? self.pausedAt : CFAbsoluteTimeGetCurrent();
+    double gap = now - self.lyricChangedAt;
+    if (newTrack) self.lyricInterval = 0;
+    else if (self.lastLyric.length && line.length && gap > 0.5 && gap < 15)
+        self.lyricInterval = self.lyricInterval > 0 ? self.lyricInterval * 0.6 + gap * 0.4 : gap;
+    self.lyricChangedAt = now;
+    self.lastSession = session;
+    self.lastLyric = line;
 }
 
 - (void)refreshLyricText {
     IKMusicCenter *m = [IKMusicCenter shared];
+    NSString *song = IKLyricString(m.recording[@"title"],512) ?: m.title;
+    NSString *artist = IKLyricString(m.recording[@"artist"],512) ?: m.artist;
     if (m.lyricsBridgeActive) {
         if (!m.bridgeLyric.length) {
-            [self.island setTitle:m.bridgeTitle ?: m.title subtitle:m.artist playing:m.isPlaying];
+            [self.island setTitle:m.bridgeTitle ?: song subtitle:artist playing:m.isPlaying];
             return;
         }
         double speed = m.playbackSpeed > 0 ? m.playbackSpeed : 1;
         [self.island setLyric:m.bridgeLyric
-                         title:(m.bridgeTitle ?: m.title)
+                         title:(m.bridgeTitle ?: song)
                   lineDuration:m.bridgeLyricDuration / speed
                        elapsed:m.bridgeLyricElapsed / speed
                        playing:(m.isPlaying && m.playbackSpeed > 0)];
         return;
     }
-    NSString *lyric = nil, *song = nil;
-    NSString *baseline = nil;
-    switch (self.lyricField) {
-        case 1: lyric = m.title;  song = m.artist; baseline = self.trackTitleBaseline; break;
-        case 2: lyric = m.artist; song = m.title;  baseline = self.trackArtistBaseline; break;
-        case 3: lyric = m.album;  song = m.artist.length ? [NSString stringWithFormat:@"%@ - %@", m.title ?: @"", m.artist] : m.title; baseline = self.trackAlbumBaseline; break;
-        default: break;
-    }
-    if (lyric.length == 0 || IKSame(lyric, baseline)) {
-        // 播放器没有上报歌词（或者间奏）：第一行歌名，第二行歌手
-        [self.island setTitle:m.title subtitle:(m.artist ?: @"") playing:m.isPlaying];
+    NSString *lyric = m.reportedLyric;
+    if (!lyric.length) {
+        [self.island setTitle:song subtitle:artist playing:m.isPlaying];
         return;
     }
     // 系统只给“当前这一句”，没有下一句，也没有每句的时长，所以填色时长按最近几句的间隔估计
@@ -641,14 +570,14 @@ static const UIViewAnimationOptions IKAnimOptions =
     self.miniHolder.alpha = 0;
 }
 
-// Content and the progress path are laid out at their final size. Keep them hidden until
-// the shell reaches that size, even if a playback callback arrives during the spring.
+// Follow the visible shell while it changes size so fitted content can stay on screen.
 - (void)resizeTo:(IKState)state frame:(CGRect)frame duration:(double)duration damping:(CGFloat)damping
          velocity:(CGFloat)velocity alongside:(void (^)(void))settle {
     NSUInteger token = ++self.transitionToken;
     IKIslandView *island = self.island;
-    [island hideContentImmediately];
+    [island beginFollowingShell];
     island.state = state;
+    [UIView animateWithDuration:0.16 delay:0 options:IKAnimOptions animations:^{ island.contentAlpha = 1; } completion:nil];
     [UIView animateWithDuration:duration delay:0 usingSpringWithDamping:damping initialSpringVelocity:velocity
                         options:IKAnimOptions animations:^{
         island.transform = CGAffineTransformIdentity;
@@ -660,13 +589,13 @@ static const UIViewAnimationOptions IKAnimOptions =
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)((duration + 0.02)*NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         if (self.transitionToken != token || self.shownState != state) return;
         [UIView performWithoutAnimation:^{
+            [island endFollowingShell];
             [island.layer removeAllAnimations];
             island.transform = CGAffineTransformIdentity;
             island.frame = frame;
             [island setNeedsLayout];
             [island layoutIfNeeded];
         }];
-        [UIView animateWithDuration:0.16 animations:^{ island.contentAlpha = 1; }];
         if (state == IKStateNotif) [island playNotifEntrance];
     });
 }
@@ -728,12 +657,14 @@ static const UIViewAnimationOptions IKAnimOptions =
     NSUInteger token = ++self.transitionToken;
 
     if (style == 2 || style == 3) {
+        [island endFollowingShell];
         [UIView animateWithDuration:duration delay:0 options:IKAnimOptions | UIViewAnimationOptionCurveEaseIn animations:^{
             island.alpha = 0;
             if (style == 3) island.transform = CGAffineTransformMakeScale(0.7, 0.7);
             self.miniHolder.alpha = 0;
         } completion:nil];
     } else {
+        [island beginFollowingShell];
         [UIView animateWithDuration:duration * 0.45 delay:0 options:IKAnimOptions animations:^{
             island.contentAlpha = 0;
         } completion:nil];
@@ -798,7 +729,9 @@ static const UIViewAnimationOptions IKAnimOptions =
     else if (self.demoRetracting) target = IKStateHidden;
     else if (musicOn) target = (p.lyricEnabled && !self.userCollapsed) ? IKStateLyric : IKStateMusicCompact;
 
-    if (target != self.shownState) [self.island hideContentImmediately];
+    // A notification replaces the previous text before the music shell retracts (and vice versa).
+    if (target != IKStateHidden && self.shownState != IKStateHidden &&
+        ((target == IKStateNotif) != (self.shownState == IKStateNotif))) [self.island hideContentImmediately];
     // 内容
     CGRect frame = [self frameForState:target musicOn:musicOn];
     self.island.accent = p.accent;
@@ -841,7 +774,7 @@ static const UIViewAnimationOptions IKAnimOptions =
         [self refreshLyricText];
     }
     BOOL musicShown = (target == IKStateLyric || target == IKStateMusicCompact) && !(demo && !musicOn);
-    self.island.showsProgress = p.progressRing && musicShown && m.duration > 0;
+    if (target != IKStateHidden) self.island.showsProgress = p.progressRing && musicShown && m.duration > 0;
     if (musicShown && m.duration > 0) self.island.progress = [m currentElapsed] / m.duration;
     [self setLyricTimerRunning:(musicShown && m.isPlaying)];
 

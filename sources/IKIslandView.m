@@ -470,6 +470,8 @@ typedef NS_ENUM(NSInteger, IKTextKind) {
 @property (nonatomic, strong) IKLineView *row2;
 @property (nonatomic) BOOL iconRound;
 @property (nonatomic) IKTextKind textKind;
+@property (nonatomic, strong) CADisplayLink *sizeLink;
+@property (nonatomic) CGSize drawnSize;
 @property (nonatomic, strong) CAShapeLayer *ringTrack;
 @property (nonatomic, strong) CAShapeLayer *ring;
 @end
@@ -489,7 +491,6 @@ typedef NS_ENUM(NSInteger, IKTextKind) {
         _contentAlpha = 1;
 
         _content = [[UIView alloc] initWithFrame:self.bounds];
-        _content.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         _content.userInteractionEnabled = NO;
         [self addSubview:_content];
 
@@ -621,6 +622,7 @@ typedef NS_ENUM(NSInteger, IKTextKind) {
 }
 
 - (void)stopAnimations {
+    [self endFollowingShell];
     [self.layer removeAllAnimations];
     [self.content.layer removeAllAnimations];
 }
@@ -702,8 +704,8 @@ typedef NS_ENUM(NSInteger, IKTextKind) {
 }
 
 // 从顶部中点出发、顺时针绕胶囊一圈的路径
-- (void)layoutRingWithCornerRadius:(CGFloat)cr {
-    CGFloat W = self.bounds.size.width, H = self.bounds.size.height, i = 1.5;
+- (void)layoutRingWithCornerRadius:(CGFloat)cr size:(CGSize)size {
+    CGFloat W = size.width, H = size.height, i = 1.5;
     CGFloat x0 = i, y0 = i, x1 = W - i, y1 = H - i;
     CGFloat r = MAX(0, MIN(cr - i, MIN((y1 - y0) / 2, (x1 - x0) / 2)));
     UIBezierPath *p = [UIBezierPath bezierPath];
@@ -720,8 +722,8 @@ typedef NS_ENUM(NSInteger, IKTextKind) {
 
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
-    self.ring.frame = self.bounds;
-    self.ringTrack.frame = self.bounds;
+    self.ring.frame = (CGRect){CGPointZero,size};
+    self.ringTrack.frame = self.ring.frame;
     self.ring.path = p.CGPath;
     self.ringTrack.path = p.CGPath;
     [CATransaction commit];
@@ -745,9 +747,35 @@ typedef NS_ENUM(NSInteger, IKTextKind) {
 
 #pragma mark 布局
 
+- (void)beginFollowingShell {
+    if (self.sizeLink) return;
+    self.drawnSize = self.content.bounds.size;
+    self.sizeLink = [CADisplayLink displayLinkWithTarget:self selector:@selector(followShell:)];
+    [self.sizeLink addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
+}
+
+- (void)endFollowingShell {
+    [self.sizeLink invalidate];
+    self.sizeLink = nil;
+    [self setNeedsLayout];
+}
+
+- (void)followShell:(CADisplayLink *)link {
+    CALayer *visible = self.layer.presentationLayer;
+    if (!visible || CGSizeEqualToSize(visible.bounds.size,self.drawnSize)) return;
+    self.drawnSize = visible.bounds.size;
+    [UIView performWithoutAnimation:^{ [self layoutContentForSize:self.drawnSize]; }];
+}
+
 - (void)layoutSubviews {
     [super layoutSubviews];
-    CGFloat W = self.bounds.size.width, H = self.bounds.size.height;
+    CGSize size = self.sizeLink ? self.drawnSize : self.bounds.size;
+    [UIView performWithoutAnimation:^{ [self layoutContentForSize:size]; }];
+}
+
+- (void)layoutContentForSize:(CGSize)size {
+    CGFloat W = size.width, H = size.height;
+    self.content.frame = (CGRect){CGPointZero,size};
     CGFloat radius = MIN(H / 2, self.coversCutout ? 36 : 29);
     self.layer.cornerRadius = radius;
 
@@ -757,17 +785,18 @@ typedef NS_ENUM(NSInteger, IKTextKind) {
     BOOL two     = notif || (lyric && self.lyricLines >= 2);
 
     CGFloat bandHeight = self.cutoutBand > 0 ? self.cutoutBand : 37;
-    IKCoverTextLayout rows = IKCoverRows(self.bounds.size, bandHeight, notif ? 70 : 76, two);
-    BOOL fits = !self.coversCutout || compact || rows.fits;
-    self.content.hidden = !fits;
-    self.cover.hidden    = !(compact || lyric);
-    self.barsView.hidden = !(compact || lyric);
-    self.iconView.hidden = !notif;
-    self.appLabel.hidden = !notif;
-    self.row1.hidden     = !(lyric || notif);
-    self.row2.hidden     = !two;
+    IKCoverTextLayout rows = IKCoverRows(size, bandHeight, notif ? 70 : 76, two);
+    CGFloat side = MAX(0,(W-self.cutoutWidth)/2);
+    BOOL decorFits = !self.coversCutout || side >= 32;
+    BOOL textFits = self.coversCutout ? rows.fits : (W >= (notif ? 200 : 104) && H >= (two ? 42 : 24));
+    self.cover.hidden    = !(compact || lyric) || !decorFits;
+    self.barsView.hidden = !(compact || lyric) || !decorFits;
+    self.iconView.hidden = !notif || !decorFits;
+    self.appLabel.hidden = !notif || !decorFits;
+    self.row1.hidden     = !(lyric || notif) || !textFits;
+    self.row2.hidden     = !two || !textFits;
 
-    [self layoutRingWithCornerRadius:radius];
+    [self layoutRingWithCornerRadius:radius size:size];
 
     if (!self.coversCutout) {
         // 独立胶囊：左边封面或图标，中间文字，右边音柱
@@ -775,10 +804,10 @@ typedef NS_ENUM(NSInteger, IKTextKind) {
             self.cover.frame = CGRectMake(4, (H - 26) / 2, 26, 26);
             self.barsView.frame = CGRectMake(W - 12 - 18, (H - 16) / 2, 18, 16);
         } else if (lyric) {
-            CGFloat c = H - 12;
+            CGFloat c = MAX(0,H - 12);
             self.cover.frame = CGRectMake(6, 6, c, c);
             self.barsView.frame = CGRectMake(W - 16 - 18, (H - 16) / 2, 18, 16);
-            CGFloat x = 6 + c + 10, w = W - x - 16 - 18 - 10;
+            CGFloat x = 6 + c + 10, w = MAX(0,W - x - 16 - 18 - 10);
             if (two) {
                 self.row1.frame = CGRectMake(x, H / 2 - 21, w, 22);
                 self.row2.frame = CGRectMake(x, H / 2 + 2, w, 18);
@@ -789,7 +818,7 @@ typedef NS_ENUM(NSInteger, IKTextKind) {
             self.iconView.frame = CGRectMake(8, (H - 42) / 2, 42, 42);
             CGFloat x = 60, w = W - x - 18;
             self.appLabel.frame = CGRectMake(W - 18 - 96, H / 2 - 19, 96, 16);
-            self.row1.frame = CGRectMake(x, H / 2 - 21, w - 102, 22);
+            self.row1.frame = CGRectMake(x, H / 2 - 21, MAX(0,w - 102), 22);
             self.row2.frame = CGRectMake(x, H / 2 + 2, w, 18);
         }
     } else {
@@ -799,12 +828,14 @@ typedef NS_ENUM(NSInteger, IKTextKind) {
             self.cover.frame = CGRectMake(5, (H - 27) / 2, 27, 27);
             self.barsView.frame = CGRectMake(W - 14 - 18, (H - 16) / 2, 18, 16);
         } else if (lyric) {
-            self.cover.frame = CGRectMake(12, (H - 52) / 2, 52, 52);
+            CGFloat coverSize = MAX(0,MIN(52,MIN(H-6,side-12)));
+            self.cover.frame = CGRectMake(12, (H-coverSize)/2, coverSize, coverSize);
             self.barsView.frame = CGRectMake(W - 20 - 18, (band - 16) / 2, 18, 16);
             self.row1.frame = rows.first;
             self.row2.frame = rows.second;
         } else if (notif) {
-            self.iconView.frame = CGRectMake(14, (H - 44) / 2, 44, 44);
+            CGFloat iconSize = MAX(0,MIN(44,MIN(H-6,side-14)));
+            self.iconView.frame = CGRectMake(14, (H-iconSize)/2, iconSize, iconSize);
             CGFloat ax = W / 2 + self.cutoutWidth / 2 + 6;
             self.appLabel.frame = CGRectMake(ax, (band - 16) / 2, MAX(0, W - ax - 16), 16);
             self.row1.frame = rows.first;
