@@ -25,6 +25,8 @@ NSString *const IKMusicDidChangeNotification = @"IKMusicDidChangeNotification";
 - (void)refresh {}
 - (BOOL)refreshLyricsBridge { return NO; }
 - (void)advanceLyricsBridge {}
++ (NSString *)playbackDiagnosticReport { return nil; }
++ (NSString *)sampleReportAtURL:(NSURL *)folder { return nil; }
 + (void)requestImportTarget:(void (^)(NSDictionary *))completion { completion(nil); }
 + (NSString *)importLyricsAtURL:(NSURL *)url target:(NSDictionary *)target { return @"测试桩没有播放器"; }
 + (NSString *)removeImport:(NSDictionary *)target { return @"测试桩没有播放器"; }

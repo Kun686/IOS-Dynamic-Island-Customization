@@ -4,7 +4,7 @@
 
 - **应用通知进岛**：选中的应用来通知时，从灵动岛弹出，聊天类通知优先显示发送者头像。
 - **歌词**：显示播放器上报的当前歌词，支持逐行填色、淡入等动效；歌名和歌词的颜色分别可调；过长的歌词跟着进度滚动。
-- **播放器歌词联动**　QQ 音乐和网易云音乐适配器可转发播放器公开的当前句。导入同一录音的带时间歌词后，拖动或续播会跳到对应句。两款播放器的流媒体原生时间轴仍待实际曲目验证。
+- **播放器歌词联动**　宿主在播放信息里提供带时间歌词时，QQ 音乐和网易云音乐适配器按播放进度换句。只上报车载单句的歌曲仍可能慢一句。也可以给同一录音绑定自己的歌词文件。
 - **封面转动**：专辑封面像唱片一样旋转。
 - **播放进度环**：进度沿胶囊边缘走一圈，颜色可跟随封面。
 - **过渡动画**：回弹下落、柔和滑入、淡入、缩放弹出、果冻，五种可选，点一下就能看到演示。
@@ -19,7 +19,7 @@
 - 已安装巨魔（TrollStore）
 - 界面需要 iOS 16 及以上
 
-旧版有 iPhone 14 Pro Max / iOS 16.6.1 的测试记录。0.6.3 的播放器兼容性和微信头像仍待真机验收。
+旧版有 iPhone 14 Pro Max / iOS 16.6.1 的测试记录。0.6.4 (16) 的普通流媒体取词、微信头像和装机效果仍待对应设备验证。
 
 ## 安装
 
@@ -32,11 +32,11 @@ FINALPACKAGE=1 make package
 或者用 Xcode 和 `ldid`（快捷指令的 App Intents 只有这种方式会带上）：
 
 ```
-IK_SUFFIX=IslandKit-0.6.3 sh build.sh
+IK_SUFFIX=IslandKit-0.6.4 sh build.sh
 sh players/build.sh
 ```
 
-主包为 `packages/TrollSpeed+AppIntents16_2.0-15-IslandKit-0.6.3.tipa`，播放器适配器和独立诊断库在 `packages/IslandKit-0.6.3/`。构建机缺少可用模拟器服务时，可用 `IK_PNG_ICONS=1 IK_SUFFIX=IslandKit-0.6.3 sh build.sh` 从同一母图生成 iPhone 和 iPad 所需的 PNG 图标。
+主包为 `packages/TrollSpeed+AppIntents16_2.0-16-IslandKit-0.6.4.tipa`，两个播放器适配器和独立诊断库在 `packages/IslandKit-0.6.4/`。构建机缺少可用模拟器服务时，可用 `IK_PNG_ICONS=1 IK_SUFFIX=IslandKit-0.6.4 sh build.sh` 生成 iPhone 和 iPad 所需的 PNG 图标。
 
 把 `packages/` 里生成的 `.tipa` 传到手机，用巨魔安装。
 安装会覆盖手机上已有的 TrollSpeed（两者使用同一个 Bundle ID）。
@@ -47,7 +47,8 @@ sh players/build.sh
 2. 在“应用通知”里勾选要进岛的应用。想只看岛上的显示，到 系统设置 → 通知 把这些应用的“横幅”关掉。
 3. QQ 音乐对应 `IslandKit-QQMusic.dylib`，网易云音乐对应 `IslandKit-NetEase.dylib`。播放器加载对应插件后，播放歌曲并打开灵动岛的“歌词”页，查看当前歌曲的数据来源。
 4. 如果显示“播放器单句（无时间标签）”或“当前曲目未提供时间轴”，点“为当前歌曲选择歌词文件”，选同一录音版本的 LRC、明文 QRC 或 YRC。文件绑定到打开选择器时的歌曲。可以在该曲下移除绑定。
-5. 要排查慢一句，在出现问题的歌曲上记下播放器版本、录音版本和播放秒数，再保留 `island.log` 里的 `player diagnostic`、`recording app=` 和可能出现的 `lyrics timeline`。两个适配器内置这项诊断；单独排查时也可使用 `IslandKit-PlaybackDiagnostics.dylib`。
+5. 遇到慢一句时记下播放器版本、录音版本和发生的秒数。打开“歌词 → 导出播放诊断”保存文本。停播后也能导出每个播放器最近 24 种记录。两个适配器已内置诊断，单独观察播放字段时也可用 `IslandKit-PlaybackDiagnostics.dylib`。
+6. 手上有播放器导出的歌词样本时，可以点“检查已导出的歌词样本文件夹”，选中该目录，再在当前页点“导出播放诊断”。报告保留路径层次、扩展名、文件大小和文件头类型，目录名和文件名用占位符表示。
 
 ## 已知限制
 

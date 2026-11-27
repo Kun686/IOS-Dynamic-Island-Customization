@@ -2,6 +2,7 @@
 #import <MediaPlayer/MediaPlayer.h>
 #import "IKLyricsTimeline.h"
 #import "IKPlaybackDiagnostics.h"
+#import "IKPlaybackDiagnostic.h"
 
 // Runs inside the player. Read its own published playback metadata and local asset only.
 static NSArray *IKAssetLyrics(NSURL *url, double duration) {
@@ -19,9 +20,93 @@ static NSArray *IKAssetLyrics(NSURL *url, double duration) {
     return nil;
 }
 
-static NSArray *IKPlayerLines(NSString *published, NSURL *assetURL, double duration, NSString **source) {
-    NSArray *lines = IKParseTimedLyrics(published, duration);
-    if (lines.count) { *source = @"metadata"; return lines; }
+// Copy only the published timing fields. A mutable host dictionary must not change the previous cache key.
+static id IKCuePayload(id value, BOOL *ms, NSUInteger depth, id previous) {
+    if ([value isKindOfClass:NSString.class]) return [value length] && [value length]<=IKMaxLyricBytes ? [value copy] : nil;
+    if ([value isKindOfClass:NSData.class]) return [value length] && [value length]<=IKMaxLyricBytes ? [value copy] : nil;
+    if ([value isKindOfClass:NSDictionary.class] && depth<2) {
+        NSDictionary *d = value;
+        BOOL inherited = *ms;
+        if (d[@"timeUnit"]) inherited = [@[@"ms",@"milliseconds",@"millisecond",@YES] containsObject:d[@"timeUnit"]];
+        for (NSString *key in @[@"lines",@"timeline",@"lyricsLines",@"lrc",@"qrc",@"yrc",@"lyric",@"lyrics"]) {
+            BOOL unit = inherited;
+            id inner = IKCuePayload(d[key],&unit,depth+1,previous);
+            if (inner) { *ms=unit; return inner; }
+        }
+        return nil;
+    }
+    if (![value isKindOfClass:NSArray.class] || ![value count] || [value count]>4000) return nil;
+    if (previous && [value isEqual:previous]) return previous;
+    static NSSet *columns;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        columns = [NSSet setWithArray:@[@"start",@"startMs",@"time",@"timeMs",@"timestamp",@"timestampMs",@"begin",@"beginMs",
+            @"end",@"endMs",@"endTime",@"endTimeMs",@"duration",@"durationMs",@"text",@"lyric",@"line",@"timeUnit",@"clearAfter"]];
+    });
+    NSMutableArray *rows = [NSMutableArray array];
+    NSUInteger size = 0;
+    for (NSDictionary *row in value) {
+        if (![row isKindOfClass:NSDictionary.class] || [row count]>40) continue;
+        NSMutableDictionary *copy = [NSMutableDictionary dictionary];
+        for (id key in row) {
+            if (![columns containsObject:key]) continue;
+            id v = row[key];
+            if ([v isKindOfClass:NSNumber.class]) size += 16;
+            else if ([v isKindOfClass:NSString.class] && [v length]<=2048) size += [v lengthOfBytesUsingEncoding:NSUTF8StringEncoding];
+            else continue;
+            size += [key length];
+            if (size>IKMaxLyricBytes) return nil;
+            copy[key] = [v copy];
+        }
+        if (copy.count) [rows addObject:copy];
+    }
+    return rows.count ? rows : nil;
+}
+
+static NSArray *IKPublishedInputs(NSDictionary *info, NSArray *previous) {
+    NSMutableArray *inputs = [NSMutableArray array];
+    for (NSArray<NSString *> *path in IKPublishedLyricPaths(info)) {
+        NSString *key = [path componentsJoinedByString:@"."];
+        id value = info[path.firstObject];
+        BOOL ms = NO;
+        if (path.count==2) {
+            NSDictionary *group = value;
+            ms = [@[@"ms",@"millisecond",@"milliseconds",@YES] containsObject:group[@"timeUnit"] ?: @""];
+            value = group[path.lastObject];
+        }
+        id last = nil;
+        for (NSArray *entry in previous) {
+            if ([entry[0] isEqual:key]) { last = entry[1]; break; }
+        }
+        id payload = IKCuePayload(value,&ms,0,last);
+        if (payload) [inputs addObject:@[key,payload,@(ms)]];
+        if (inputs.count==8) break;
+    }
+    return inputs;
+}
+
+static NSArray *IKPlayerLines(NSArray *inputs, NSURL *assetURL, double duration, NSString **source, NSString **field) {
+    NSArray *lines = nil;
+    for (NSArray *entry in inputs) {
+        id value = entry[1];
+        if ([value isKindOfClass:NSData.class]) value = IKDecodeLyricText(value);
+        BOOL ms = [entry[2] boolValue];
+        NSString *text = IKLyricString(value,IKMaxLyricBytes);
+        // Some providers publish a JSON object or a JSON array as a string.
+        NSScanner *scanner = text ? [NSScanner scannerWithString:text] : nil;
+        BOOL jsonArray = [scanner scanString:@"[" intoString:nil] && [scanner scanString:@"{" intoString:nil];
+        if (jsonArray || [text hasPrefix:@"{"]) {
+            NSData *bytes = [text dataUsingEncoding:NSUTF8StringEncoding];
+            id json = bytes.length<=IKMaxLyricBytes ? [NSJSONSerialization JSONObjectWithData:bytes options:0 error:nil] : nil;
+            value = IKCuePayload(json,&ms,0,nil);
+        }
+        lines = [value isKindOfClass:NSArray.class] ? IKNormalizeLyricLines(value,ms,duration) : IKParseTimedLyrics(value,duration);
+        if (lines.count) {
+            *field = entry[0];
+            *source = [*field isEqual:MPMediaItemPropertyLyrics] ? @"metadata" : @"publishedField";
+            return lines;
+        }
+    }
     if (assetURL.isFileURL) {
         NSURL *stem = assetURL.URLByDeletingPathExtension;
         for (NSString *ext in @[@IK_PLAYER_FORMAT, @"lrc"]) {
@@ -51,6 +136,7 @@ static NSArray *IKPlayerLines(NSString *published, NSURL *assetURL, double durat
 @property(nonatomic, copy) NSDictionary *lastTrack;
 @property(nonatomic, strong) IKRecordingTracker *tracker;
 @property(nonatomic) BOOL publishedRecording;
+@property(nonatomic, copy) NSDictionary *lyricEvidence;
 @property(nonatomic) NSUInteger accessEvents, jumpEvents;
 @property(nonatomic, strong) NSURL *file;
 @property(nonatomic, strong) dispatch_source_t timer;
@@ -101,9 +187,9 @@ static NSArray *IKPlayerLines(NSString *published, NSURL *assetURL, double durat
 }
 
 - (BOOL)writeInfo:(NSDictionary *)info bundle:(NSString *)bundle {
-    NSDictionary *track = IKTrackIdentity(info[MPNowPlayingInfoPropertyExternalContentIdentifier],
+    NSDictionary *track = IKReportedTrack(info[MPNowPlayingInfoPropertyExternalContentIdentifier],
         info[MPMediaItemPropertyPersistentID], info[MPMediaItemPropertyTitle], info[MPMediaItemPropertyArtist],
-        [info[MPMediaItemPropertyPlaybackDuration] doubleValue]);
+        info[MPMediaItemPropertyPlaybackDuration], [info[MPNowPlayingInfoPropertyIsLiveStream] isEqual:@YES]);
     if (!self.tracker) self.tracker = [IKRecordingTracker new];
     if (!track && info.count && self.tracker.recording) track = @{};
     [self.tracker observe:track album:IKLyricString(info[MPMediaItemPropertyAlbumTitle],512)
@@ -122,12 +208,12 @@ static NSArray *IKPlayerLines(NSString *published, NSURL *assetURL, double durat
              ![((AVURLAsset *)self.observedItem.asset).URL isEqual:assetURL] || !IKSameRecording(track,self.observedTrack))
         [self watchItem:nil track:nil];
     NSURL *url = assetURL.isFileURL ? assetURL : nil;
-    NSString *text = IKLyricString(info[MPMediaItemPropertyLyrics], IKMaxLyricBytes);
-    NSArray *input = @[track ?: @{}, text ?: @"", url ?: NSNull.null, @(self.streamRevision)];
+    NSArray *published = track ? IKPublishedInputs(info,self.lastInput[1]) : @[];
+    NSArray *input = @[track ?: @{}, published, url ?: NSNull.null, @(self.streamRevision)];
     if ([self.lastInput isEqual:input]) return NO;
-    NSString *source = @"idle";
+    NSString *source = @"idle", *field = nil;
     double duration = [track[@"duration"] doubleValue];
-    NSArray *lines = track ? IKPlayerLines(text, url, duration, &source) : @[];
+    NSArray *lines = track ? IKPlayerLines(published,url,duration,&source,&field) : @[];
     if (!lines.count && self.streamCues.count) {
         lines = IKNormalizeLyricLines(self.streamCues.allValues, NO, duration);
         if (lines.count) source = @"timedAudio";
@@ -138,10 +224,13 @@ static NSArray *IKPlayerLines(NSString *published, NSURL *assetURL, double durat
     snapshot[@"active"] = @(track != nil);
     snapshot[@"source"] = source;
     snapshot[@"lines"] = lines;
+    if (field) snapshot[@"sourceKey"] = field;
+    self.lyricEvidence = @{@"source":@"unwritten",@"lines":@0};
     NSFileManager *fm = NSFileManager.defaultManager;
     if (![fm createDirectoryAtURL:self.file.URLByDeletingLastPathComponent withIntermediateDirectories:YES attributes:nil error:nil]) return NO;
     NSData *data = [NSPropertyListSerialization dataWithPropertyList:snapshot format:NSPropertyListBinaryFormat_v1_0 options:0 error:nil];
     if (data.length && data.length <= IKMaxLyricBytes && [data writeToURL:self.file options:NSDataWritingAtomic error:nil]) {
+        self.lyricEvidence = @{@"source":source,@"key":field ?: @"",@"lines":@(lines.count)};
         self.lastInput = input;
         self.lastTrack = track;
         return YES;
@@ -186,10 +275,10 @@ static NSArray *IKPlayerLines(NSString *published, NSURL *assetURL, double durat
 - (void)publish {
     NSString *bundle = NSBundle.mainBundle.bundleIdentifier;
     NSDictionary *info = MPNowPlayingInfoCenter.defaultCenter.nowPlayingInfo;
-    IKWritePlaybackSignals(self.file.URLByDeletingLastPathComponent,bundle,info,self.accessEvents,self.jumpEvents);
     if ([self writeInfo:info bundle:bundle]) {
         CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR(IKLyricsChangedDarwin), NULL, NULL, true);
     }
+    IKWritePlaybackSignals(self.file.URLByDeletingLastPathComponent,bundle,info,self.accessEvents,self.jumpEvents,self.lyricEvidence);
     if (self.publishedRecording)
         CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR(IKRecordingChangedDarwin), NULL, NULL, true);
     [self publishClockForBundle:bundle];

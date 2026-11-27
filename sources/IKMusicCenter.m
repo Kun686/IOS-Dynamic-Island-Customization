@@ -13,10 +13,10 @@ static double IKNumber(id value) {
 }
 
 static NSDictionary *IKSystemTrack(NSDictionary *d) {
-    return IKTrackIdentity(d[(__bridge NSString *)kMRMediaRemoteNowPlayingInfoExternalContentIdentifier],
+    return IKReportedTrack(d[(__bridge NSString *)kMRMediaRemoteNowPlayingInfoExternalContentIdentifier],
         d[(__bridge NSString *)kMRMediaRemoteNowPlayingInfoUniqueIdentifier],
         d[(__bridge NSString *)kMRMediaRemoteNowPlayingInfoTitle], d[(__bridge NSString *)kMRMediaRemoteNowPlayingInfoArtist],
-        [d[(__bridge NSString *)kMRMediaRemoteNowPlayingInfoDuration] doubleValue]);
+        d[(__bridge NSString *)kMRMediaRemoteNowPlayingInfoDuration],NO);
 }
 
 static BOOL IKSupportedPlayer(NSString *bid) {
@@ -65,6 +65,7 @@ static NSString *IKAdjacentFile(NSString *playerPath, NSString *name) {
 @property(nonatomic, strong) NSNumber *queueIndex;
 @property(nonatomic, copy) NSString *playerLine, *loggedSession, *lastDiagnostic;
 @property(nonatomic) double playerLineExpiry;
+@property(nonatomic) NSInteger loggedField;
 @property(nonatomic, strong) UIImage *artwork;
 @property(nonatomic, strong) NSData *artworkData;
 @property(nonatomic) BOOL isPlaying, lyricsBridgeActive, singleCue;
@@ -186,6 +187,20 @@ static NSDictionary *IKSnapshot(NSString *path) {
                 enriched[key] = self.tracker.recording[key];
             }
         }
+        if ([self.tracker.recording[@"unstablePersistentID"] isEqual:@YES] && ![base[@"unstablePersistentID"] isEqual:@YES]) {
+            if (!enriched) enriched = [base mutableCopy];
+            enriched[@"unstablePersistentID"] = @YES;
+        }
+        if ([self.tracker.recording[@"correctedTitle"] isEqual:@YES] && ![base[@"correctedTitle"] isEqual:@YES]) {
+            if (!enriched) enriched = [base mutableCopy];
+            enriched[@"title"] = self.tracker.recording[@"title"];
+            enriched[@"correctedTitle"] = @YES;
+        }
+        if ([base[@"duration"] doubleValue] <= 0 && [self.tracker.recording[@"duration"] doubleValue] > 0) {
+            if (!enriched) enriched = [base mutableCopy];
+            enriched[@"duration"] = self.tracker.recording[@"duration"];
+            if (![self.tracker.recording[@"live"] isEqual:@YES]) [enriched removeObjectForKey:@"live"];
+        }
         if (enriched) self.pairedBase = enriched;
     }
     self.recording = self.pairedBase ?: self.tracker.recording;
@@ -198,9 +213,15 @@ static NSDictionary *IKSnapshot(NSString *path) {
     NSString *session = self.tracker.recording[@"playSession"];
     if (bid.length && session && ![session isEqual:self.loggedSession]) {
         self.loggedSession = session;
+        self.loggedField = 0;
         [IKPrefs log:[NSString stringWithFormat:@"recording app=%@ externalID=%d persistentID=%d queueIndex=%d",
                       bid, [self.rawTrack[@"externalID"] length]>0, [self.rawTrack[@"persistentID"] length]>0, self.queueIndex!=nil]];
         [self logPlayerDiagnostic];
+    }
+    NSInteger field = self.playerLine && [s[@"lyricField"] isKindOfClass:NSNumber.class] ? [s[@"lyricField"] integerValue] : self.tracker.lyricField;
+    if (field >= 0 && field <= 3 && field != self.loggedField) {
+        [IKPrefs log:[NSString stringWithFormat:@"lyric field=%ld",(long)field]];
+        self.loggedField = field;
     }
 }
 
@@ -224,7 +245,7 @@ static NSDictionary *IKSnapshot(NSString *path) {
     [files addObjectsFromArray:@[self.playerPath ?: @"", legacy]];
     NSMutableArray *key = [NSMutableArray arrayWithObject:bid ?: @""];
     for (NSString *p in files) [key addObject:IKFileStamp(p)];
-    BOOL changed = ![key isEqual:self.loadedKey] || (self.loadedTrack != track && !IKSameRecording(self.loadedTrack, track));
+    BOOL changed = ![key isEqual:self.loadedKey] || (self.loadedTrack != track && ![self.loadedTrack isEqual:track]);
     if (changed) {
         [self loadPlayerClock];
         self.loadedKey = key;
@@ -232,7 +253,7 @@ static NSDictionary *IKSnapshot(NSString *path) {
         self.bridgeLines = nil;
         self.bridgeTitle = nil;
         self.singleCue = NO;
-        for (NSUInteger i=0; bid.length && track && i<files.count; i++) {
+        for (NSUInteger i=0; bid.length && track && ![track[@"live"] isEqual:@YES] && i<files.count; i++) {
             if (key[i+1] == NSNull.null) continue;
             NSDictionary *d = IKSnapshot(files[i]);
             if (!d || [d[@"active"] isEqual:@NO]) continue;
@@ -241,7 +262,8 @@ static NSDictionary *IKSnapshot(NSString *path) {
             BOOL ms = [@[@"ms", @"millisecond", @"milliseconds", @YES] containsObject:d[@"timeUnit"] ?: @""];
             double dur = IKNumber(d[@"durationMs"]) / 1000;
             if (dur <= 0) dur = IKNumber(d[@"duration"]) / (ms ? 1000 : 1);
-            NSDictionary *identity = IKTrackIdentity(d[@"externalID"], d[@"persistentID"], d[@"title"] ?: d[@"trackTitle"], d[@"artist"], dur);
+            id persistent = [d[@"unstablePersistentID"] isEqual:@YES] ? nil : d[@"persistentID"];
+            NSDictionary *identity = IKTrackIdentity(d[@"externalID"], persistent, d[@"title"] ?: d[@"trackTitle"], d[@"artist"], dur);
             if (!IKSameRecording(track, identity)) continue;
             NSArray *rows = IKNormalizeLyricLines(d[@"lines"] ?: d[@"timeline"] ?: d[@"lyricsLines"], ms, self.duration);
             if (!rows.count) rows = IKParseTimedLyrics(d[@"lrc"] ?: d[@"lyrics"], self.duration);
@@ -259,9 +281,15 @@ static NSDictionary *IKSnapshot(NSString *path) {
             }
             if (rows.count) {
                 self.bridgeLines = rows;
-                self.bridgeTitle = identity[@"title"];
-                [IKPrefs log:[NSString stringWithFormat:@"lyrics timeline app=%@ source=%@ lines=%lu",
-                              bid, i < imports.count ? @"import" : (i == imports.count ? (IKLyricString(d[@"source"],24) ?: @"player") : @"legacy"), (unsigned long)rows.count]];
+                self.bridgeTitle = [track[@"correctedTitle"] isEqual:@YES] ? track[@"title"] : IKLyricString(identity[@"title"],512);
+                NSString *source = i < imports.count ? @"import" : @"legacy";
+                NSString *field = @"";
+                if (i == imports.count) {
+                    source = IKMetadataSymbol(d[@"source"]) ? d[@"source"] : @"player";
+                    if (IKMetadataSymbol(d[@"sourceKey"])) field = [@" key=" stringByAppendingString:d[@"sourceKey"]];
+                }
+                [IKPrefs log:[NSString stringWithFormat:@"lyrics timeline app=%@ source=%@%@ lines=%lu",
+                              bid, source, field, (unsigned long)rows.count]];
                 break;
             }
         }
@@ -313,6 +341,11 @@ static NSDictionary *IKSnapshot(NSString *path) {
     BOOL boundary = [self.tracker observe:raw album:album queueIndex:index
                                  position:info[(__bridge NSString *)kMRMediaRemoteNowPlayingInfoElapsedTime]
                                    bundle:self.mediaApplicationID];
+    if ([self.tracker.recording[@"unstablePersistentID"] isEqual:@YES] && raw) {
+        NSMutableDictionary *adjusted = [raw mutableCopy];
+        adjusted[@"unstablePersistentID"] = @YES;
+        self.rawTrack = adjusted;
+    }
     if (boundary || index || !raw) self.queueIndex = index;
     NSDictionary *previousBase = self.pairedBase;
     if (boundary) self.pairedBase = nil;
@@ -403,6 +436,11 @@ static NSDictionary *IKImportTarget(NSString *bid, NSDictionary *info) {
     }
     if (!base && ([raw[@"externalID"] length] || [raw[@"persistentID"] length])) base = raw;
     NSMutableDictionary *target = [base mutableCopy];
+    if ([target[@"live"] isEqual:@YES]) {
+        target[@"bundleID"] = bid;
+        target[@"mode"] = @"电台 / 直播节目";
+        return target;
+    }
     if (!IKRecordingFile(bid,target)) return nil;
     target[@"bundleID"] = bid;
     NSDictionary *packet = IKSnapshot(playerPath);
@@ -446,9 +484,85 @@ static NSDictionary *IKImportTarget(NSString *bid, NSDictionary *info) {
     });
 }
 
+static NSString *IKSelectedShapePath(NSString *bundle) {
+    if (!IKSupportedPlayer(bundle)) return nil;
+    NSString *name = [NSString stringWithFormat:@"selected-lyric-%@.plist",bundle.lowercaseString];
+    return [IKDataDir stringByAppendingPathComponent:name];
+}
+
++ (NSString *)playbackDiagnosticReport {
+    NSMutableArray *parts = [NSMutableArray array];
+    for (NSString *bid in @[@"com.tencent.QQMusic",@"com.netease.cloudmusic"]) {
+        NSString *path = IKPlayerLyricsPath(bid);
+        NSString *history = path ? IKDiagnosticHistory([NSURL fileURLWithPath:path.stringByDeletingLastPathComponent],bid) : nil;
+        if (!history) history = IKDiagnosticSummary(IKSnapshot(IKAdjacentFile(path,IKPlaybackDiagnosticsName)),bid,
+                                                   NSProcessInfo.processInfo.systemUptime,NSDate.date.timeIntervalSince1970);
+        if (history) [parts addObject:history];
+        NSString *file = IKFileShapeSummary(IKSnapshot(IKSelectedShapePath(bid)));
+        if (file) [parts addObject:[NSString stringWithFormat:@"%@ selected/%@",bid,file]];
+    }
+    return parts.count ? [parts componentsJoinedByString:@"\n"] : nil;
+}
+
+// The settings file picker supplies the root. Only shapes leave this method.
++ (NSString *)sampleReportAtURL:(NSURL *)folder {
+    NSNumber *isDirectory = nil, *symlink = nil;
+    if (!folder.isFileURL || ![folder getResourceValue:&isDirectory forKey:NSURLIsDirectoryKey error:nil] || !isDirectory.boolValue ||
+        ![folder getResourceValue:&symlink forKey:NSURLIsSymbolicLinkKey error:nil] || symlink.boolValue) return nil;
+    NSArray *keys = @[NSURLIsDirectoryKey, NSURLIsSymbolicLinkKey, NSURLIsRegularFileKey];
+    __block NSUInteger unreadable = 0;
+    NSDirectoryEnumerator<NSURL *> *walk = [NSFileManager.defaultManager enumeratorAtURL:folder includingPropertiesForKeys:keys
+        options:NSDirectoryEnumerationSkipsHiddenFiles | NSDirectoryEnumerationSkipsPackageDescendants
+        errorHandler:^BOOL(NSURL *url, NSError *error) { unreadable++; return YES; }];
+    if (!walk) return nil;
+    NSUInteger checked = 0;
+    BOOL limited = NO;
+    NSMutableArray<NSString *> *rows = [NSMutableArray array];
+    for (NSURL *url in walk) {
+        if (checked == 256 || rows.count == 32) { limited = YES; break; }
+        checked++;
+        NSDictionary *attrs = [url resourceValuesForKeys:keys error:nil];
+        if (!attrs) { unreadable++; continue; }
+        if ([attrs[NSURLIsSymbolicLinkKey] boolValue]) continue;
+        if ([attrs[NSURLIsDirectoryKey] boolValue]) {
+            if (walk.level >= 3) { [walk skipDescendants]; limited = YES; }
+            continue;
+        }
+        if (![attrs[NSURLIsRegularFileKey] boolValue]) continue;
+        NSMutableArray *path = [NSMutableArray arrayWithObject:@"<sample>"];
+        BOOL matches = IKLyricSymbol(folder.lastPathComponent) || IKLyricSymbol(url.lastPathComponent);
+        NSArray *components = url.pathComponents;
+        for (NSUInteger i = components.count - walk.level; i+1 < components.count; i++) {
+            BOOL lyric = IKLyricSymbol(components[i]);
+            matches |= lyric;
+            [path addObject:lyric ? @"<lyric-dir>" : @"<dir>"];
+        }
+        if (!matches) continue;
+        NSString *shape = IKFileShapeSummary(IKLyricFileShape(url));
+        if (!shape) { unreadable++; continue; }
+        [path addObject:shape];
+        [rows addObject:[path componentsJoinedByString:@"/"]];
+    }
+    [rows sortUsingSelector:@selector(compare:)];
+    NSString *summary = [NSString stringWithFormat:@"sample folder checked=%lu matched=%lu unreadable=%lu limited=%d",
+                         (unsigned long)checked,(unsigned long)rows.count,(unsigned long)unreadable,limited];
+    [rows insertObject:summary atIndex:0];
+    return [rows componentsJoinedByString:@"\n"];
+}
+
 + (NSString *)importLyricsAtURL:(NSURL *)url target:(NSDictionary *)target {
-    NSURL *dest = IKImportURLs(target[@"bundleID"],target).firstObject;
+    NSArray<NSURL *> *candidates = IKImportURLs(target[@"bundleID"],target);
+    NSURL *dest = candidates.firstObject;
+    // Keep a no-external-ID binding discoverable on replay if the player later generates a different ID.
+    if (![target[@"externalID"] length] && candidates.count > 1 && ![target[@"unstablePersistentID"] isEqual:@YES]) {
+        NSURL *metadataURL = candidates.lastObject;
+        NSDictionary *old = IKSnapshot(metadataURL.path);
+        if (!IKSnapshot(dest.path) && (!old || IKSameRecording(target,old))) dest = metadataURL;
+    }
     if (!dest || !IKSupportedPlayer(target[@"bundleID"])) return @"未识别当前歌曲";
+    NSDictionary *shape = IKLyricFileShape(url);
+    if (shape && [NSFileManager.defaultManager createDirectoryAtPath:IKDataDir withIntermediateDirectories:YES attributes:nil error:nil])
+        [shape writeToFile:IKSelectedShapePath(target[@"bundleID"]) atomically:YES];
     NSData *bytes = IKReadLyricFile(url);
     if (!bytes) return @"文件读不到或超过 512 KB";
     NSString *text = IKDecodeLyricText(bytes);

@@ -99,14 +99,68 @@ static void testRecordingUpdates(IKPlayerLyrics *player, NSURL *folder, NSString
     check([hud observe:hud.recording album:nil queueIndex:nil position:@1 bundle:@"other"], "changing players starts a new session");
 }
 
-static void testSignals(NSURL *directory, NSURL *asset, NSString *bid) {
+static void testPublishedTimeline(IKPlayerLyrics *player, NSString *bundle, NSURL *folder) {
+    NSMutableDictionary *info = [@{MPMediaItemPropertyTitle:@"测试录音", MPMediaItemPropertyArtist:@"测试歌手",
+        MPMediaItemPropertyPlaybackDuration:@98, MPNowPlayingInfoPropertyExternalContentIdentifier:@"fixture",
+        @"player.syncedLyrics":@{@"timeUnit":@"ms", @"lines":@[
+            @{@"start":@500, @"text":@"甲"}, @{@"start":@2500, @"text":@"乙"}]}} mutableCopy];
+    check([player writeInfo:info bundle:bundle], "write custom published field");
+    NSDictionary *packet = [NSDictionary dictionaryWithContentsOfURL:player.file];
+    check([lineAt(packet[@"lines"],2.5) isEqual:@"乙"], "public custom field selects second cue without AssetURL");
+    check([packet[@"source"] isEqual:@"publishedField"] && [packet[@"sourceKey"] isEqual:@"player.syncedLyrics"], "record actual published source");
+    NSURL *handoff = [folder URLByAppendingPathComponent:@"custom-output.plist"];
+    check([[NSData dataWithContentsOfURL:player.file] writeToURL:handoff atomically:YES], "save exact producer bytes for the HUD test");
+    [info removeObjectForKey:@"player.syncedLyrics"];
+    info[@"player.lrc"] = @"[00:01]新甲\n[00:03]新乙";
+    check([player writeInfo:info bundle:bundle], "custom field changes mid-recording");
+    check([lineAt([NSDictionary dictionaryWithContentsOfURL:player.file][@"lines"],3) isEqual:@"新乙"], "replace custom timeline from LRC");
+    info[@"player.lrc"] = @"无时间单句";
+    check([player writeInfo:info bundle:bundle] && ![[NSDictionary dictionaryWithContentsOfURL:player.file][@"lines"] count],
+          "untimed custom value clears expired timeline");
+    [info removeObjectForKey:@"player.lrc"];
+    NSMutableDictionary *cue = [@{@"startMs":@1000,@"text":@"初次"} mutableCopy];
+    info[@"vendor"] = @{@"timedLyrics":@[cue]};
+    check([player writeInfo:info bundle:bundle], "nested published timing data becomes available");
+    packet = [NSDictionary dictionaryWithContentsOfURL:player.file];
+    check([packet[@"sourceKey"] isEqual:@"vendor.timedLyrics"] && [lineAt(packet[@"lines"],1) isEqual:@"初次"],
+          "nested public field path and cue agree");
+    cue[@"text"] = @"改正";
+    check([player writeInfo:info bundle:bundle] &&
+          [lineAt([NSDictionary dictionaryWithContentsOfURL:player.file][@"lines"],1) isEqual:@"改正"], "mutable nested cue invalidates snapshot");
+    [info removeObjectForKey:@"vendor"];
+    info[@"lyricEnvelope"] = @{@"timeUnit":@"ms", @"syncedLyrics":@[@{@"start":@2500,@"text":@"套层原文"}]};
+    [player writeInfo:info bundle:bundle];
+    packet = [NSDictionary dictionaryWithContentsOfURL:player.file];
+    check([packet[@"sourceKey"] isEqual:@"lyricEnvelope.syncedLyrics"] && !lineAt(packet[@"lines"],2.499) &&
+          [lineAt(packet[@"lines"],2.5) isEqual:@"套层原文"], "nested lyric-named container passes its time unit to published rows");
+    [info removeObjectForKey:@"lyricEnvelope"];
+    info[@"originalLyrics"] = @"[ {\"startMs\":1200,\"text\":\"原文\"} ]";
+    info[@"aTranslatedLyrics"] = @"[00:01.2]翻译";
+    check([player writeInfo:info bundle:bundle], "published JSON alternative");
+    packet = [NSDictionary dictionaryWithContentsOfURL:player.file];
+    check([lineAt(packet[@"lines"],1.2) isEqual:@"原文"] && [packet[@"sourceKey"] isEqual:@"originalLyrics"],
+          "prefer original JSON over translated text");
+    [info removeObjectForKey:@"aTranslatedLyrics"];
+    [info removeObjectForKey:@"originalLyrics"];
+    info[@"vendor.qrc"] = [@"[1200,500]字(1200,500)" dataUsingEncoding:NSUTF8StringEncoding];
+    check([player writeInfo:info bundle:bundle] &&
+          [lineAt([NSDictionary dictionaryWithContentsOfURL:player.file][@"lines"],1.2) isEqual:@"字"], "published timed bytes");
+    info[@"vendor.qrc"] = [NSData data];
+    info[@"comment"] = @"[00:01]unrelated field";
+    [player writeInfo:info bundle:bundle];
+    check(![[NSDictionary dictionaryWithContentsOfURL:player.file][@"lines"] count], "ignore unrelated timestamp-looking metadata");
+
+}
+
+static void testSignals(NSURL *parent, NSURL *asset, NSString *bid) {
+    NSURL *directory = [parent URLByAppendingPathComponent:NSUUID.UUID.UUIDString isDirectory:YES];
     NSDictionary *info = @{MPMediaItemPropertyTitle:@"sensitive-song",MPMediaItemPropertyPersistentID:@98765432,
-                           MPNowPlayingInfoPropertyAssetURL:asset,@"sensitive-key":@"sensitive-value"};
+                           MPNowPlayingInfoPropertyAssetURL:asset,@"sensitive key/user@example":@"sensitive-value", @"VendorLRC":@[]};
     NSDictionary *data = IKPlaybackSignals(info,14,2);
     NSDictionary *fields = data[@"fields"];
     check([fields[@"title"] isEqual:@"text"] && [fields[@"persistentID"] isEqual:@"number"], "public key shapes");
-    check([data[@"unknown"] isEqual:@1] && [data[@"asset"] isEqual:@"file"] && [data[@IK_PLAYER_FORMAT] boolValue], "only neighboring file extensions and unknown count");
-    IKWritePlaybackSignals(directory,bid,info,14,2);
+    check([data[@"unknown"] isEqual:@2] && [data[@"asset"] isEqual:@"file"] && [data[@IK_PLAYER_FORMAT] boolValue], "only neighboring file extensions and unknown count");
+    IKWritePlaybackSignals(directory,bid,info,14,2,nil);
     NSDictionary *packet = [NSDictionary dictionaryWithContentsOfURL:[directory URLByAppendingPathComponent:IKPlaybackDiagnosticsName]];
     NSString *dump = [packet description];
     check(packet && ![dump containsString:@"sensitive"] && ![dump containsString:@"98765432"] && ![dump containsString:asset.path], "diagnostic file excludes content, IDs and paths");
@@ -114,9 +168,43 @@ static void testSignals(NSURL *directory, NSURL *asset, NSString *bid) {
     NSString *summary = IKDiagnosticSummary(packet,bid,now,wall);
     check([summary containsString:@"avAccess=14 avJump=2"] && [summary containsString:@"title/text"], "consumer prints actual observed counters");
     check(!IKDiagnosticSummary(packet,bid,now+91,wall+91) && !IKDiagnosticSummary(packet,@"wrong",now,wall), "old and foreign diagnostics rejected");
+    NSDictionary *nestedSignals = IKPlaybackSignals(@{@"vendor":@{@"timedLyrics":@[],@"contact":@"sensitive"}},0,0);
+    NSDictionary *children = nestedSignals[@"nestedFields"];
+    check([children[@"vendor.timedLyrics"] isEqual:@"array"] && children.count==1, "nested lyric fields expose only names and types");
+    NSDictionary *objectSignals = IKPlaybackSignals(@{@"vendor":@{@"timedLyrics":@[[TestProxy new]]},@"unrelated":[TestProxy new]},0,0);
+    NSMutableDictionary *objectPacket = [packet mutableCopy];
+    [objectPacket addEntriesFromDictionary:objectSignals];
+    check([IKDiagnosticSummary(objectPacket,bid,now,wall) containsString:@"objects=[vendor.timedLyrics[]/TestProxy]"],
+          "report the type actually published as a lyric row and exclude unrelated objects");
+    check([summary containsString:@"VendorLRC/array"] && [summary containsString:@"omitted=1"] &&
+          [summary containsString:@"<media>/*."] && [summary containsString:@"header=timed-text"], "diagnostic locates custom key and identifies adjacent text shape");
+    NSMutableDictionary *many = [NSMutableDictionary dictionary];
+    for (int i=0;i<65;i++) many[[NSString stringWithFormat:@"Field%d",i]] = @1;
+    many[@"zKaraokeLyrics"] = @"sensitive";
+    NSDictionary *extras = IKPlaybackSignals(many,0,0)[@"customFields"];
+    check(extras.count==40 && [extras[@"zKaraokeLyrics"] isEqual:@"text"], "lyric-like keys survive report limit");
+    NSMutableDictionary *archived = [packet mutableCopy];
+    archived[@"wall"] = @1000;
+    archived[@"uptime"] = @50;
+    IKRememberDiagnostic(directory,archived);
+    archived[@"accessEvents"] = @50;
+    IKRememberDiagnostic(directory,archived);
+    NSString *history = IKDiagnosticHistory(directory,bid);
+    check([history containsString:@"avAccess=50"] && ![history containsString:@"sensitive"] && ![history containsString:asset.path],
+          "durable report survives expiry and strips actual content");
+    check([history componentsSeparatedByString:@"VendorLRC/array"].count==2, "deduplicate equivalent key shapes across heartbeats");
+    check(!IKDiagnosticHistory(directory,@"other"), "do not export another player's packet");
+    NSURL *binary = [directory URLByAppendingPathComponent:@"private-person.qrc"];
+    const uint8_t bytes[] = {0,1,2,3,4,5};
+    [[NSData dataWithBytes:bytes length:sizeof(bytes)] writeToURL:binary atomically:YES];
+    NSString *fileSummary = IKFileShapeSummary(IKLyricFileShape(binary));
+    check([fileSummary isEqual:@"*.qrc bytes=6 header=binary"], "binary header described without filenames or bytes");
+    [[NSData data] writeToURL:binary atomically:YES];
+    check([IKLyricFileShape(binary)[@"header"] isEqual:@"empty"], "explicit empty file shape");
     NSDictionary *remote = IKPlaybackSignals(@{MPNowPlayingInfoPropertyAssetURL:[NSURL URLWithString:@"https://example.invalid/private"]},0,0);
     check([remote[@"asset"] isEqual:@"remote"] && !remote[@"qrc"] && ![[remote description] containsString:@"private"], "remote URL shape only");
     check([IKPlaybackSignals(@{},0,0)[@"asset"] isEqual:@"absent"], "missing asset seen explicitly");
+    [NSFileManager.defaultManager removeItemAtURL:directory error:nil];
 }
 
 int main(int argc, const char *argv[]) { @autoreleasepool {
@@ -211,6 +299,7 @@ int main(int argc, const char *argv[]) { @autoreleasepool {
     [[NSMutableData dataWithLength:IKMaxLyricBytes+1] writeToURL:large atomically:YES];
     check(!IKReadLyricFile(large), "size bound");
 
+    testPublishedTimeline(player,bid,folder);
     testRecordingUpdates(player,folder,bid);
     testSignals(folder,audio,bid);
     NSString *legacy = @"[00:01]歌词";

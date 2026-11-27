@@ -8,6 +8,7 @@
 
 NSString *IKLyricString(id value, NSUInteger limit);
 NSDictionary *IKTrackIdentity(id externalID, id persistentID, id title, id artist, double duration);
+NSDictionary *IKReportedTrack(id externalID, id persistentID, id title, id artist, id duration, BOOL live);
 BOOL IKConflictingRecordingIDs(NSDictionary *a, NSDictionary *b);
 BOOL IKSameRecording(NSDictionary *a, NSDictionary *b);
 NSString *IKRecordingFile(NSString *bundleID, NSDictionary *track);

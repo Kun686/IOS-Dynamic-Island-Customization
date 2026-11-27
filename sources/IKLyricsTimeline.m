@@ -18,10 +18,30 @@ NSDictionary *IKTrackIdentity(id externalID, id persistentID, id title, id artis
              @"artist":IKLyricString(artist, 512) ?: @"", @"duration":@(isfinite(duration) ? MAX(0, duration) : 0)};
 }
 
+NSDictionary *IKReportedTrack(id externalID, id persistentID, id title, id artist, id duration, BOOL live) {
+    BOOL numeric = [duration isKindOfClass:NSNumber.class];
+    double seconds = numeric ? [duration doubleValue] : 0;
+    if ([duration isKindOfClass:NSString.class]) {
+        NSScanner *scanner = [NSScanner scannerWithString:duration];
+        numeric = [scanner scanDouble:&seconds] && scanner.atEnd && isfinite(seconds);
+        if (!numeric) seconds = 0;
+    }
+    NSDictionary *raw = IKTrackIdentity(externalID,persistentID,title,artist,seconds);
+    if (!raw || (!live && !(numeric && seconds == 0))) return raw;
+    NSMutableDictionary *stream = [raw mutableCopy];
+    stream[@"live"] = @YES;
+    return stream;
+}
+
+static NSString *IKReliableID(NSDictionary *track, NSString *key) {
+    if ([key isEqual:@"persistentID"] && [track[@"unstablePersistentID"] isEqual:@YES]) return nil;
+    return IKLyricString(track[key],512);
+}
+
 BOOL IKSameRecording(NSDictionary *a, NSDictionary *b) {
     if (!a || !b) return NO;
     for (NSString *key in @[@"externalID", @"persistentID"]) {
-        NSString *x = IKLyricString(a[key], 512), *y = IKLyricString(b[key], 512);
+        NSString *x = IKReliableID(a,key), *y = IKReliableID(b,key);
         if (x && y) return [x isEqualToString:y];
     }
     NSString *title = IKLyricString(a[@"title"], 512), *artist = IKLyricString(a[@"artist"], 512);
@@ -32,10 +52,10 @@ BOOL IKSameRecording(NSDictionary *a, NSDictionary *b) {
 }
 
 NSString *IKRecordingFile(NSString *bundleID, NSDictionary *track) {
-    if (!bundleID.length || !IKSameRecording(track, track)) return nil;
+    if (!bundleID.length || [track[@"live"] isEqual:@YES] || !IKSameRecording(track, track)) return nil;
     NSMutableArray *components = [NSMutableArray arrayWithObject:bundleID.lowercaseString];
     for (NSString *key in @[@"externalID", @"persistentID"]) {
-        if ([track[key] length]) { [components addObjectsFromArray:@[key, track[key]]]; break; }
+        if (IKReliableID(track,key)) { [components addObjectsFromArray:@[key, track[key]]]; break; }
     }
     if (components.count == 1) {
         [components addObjectsFromArray:@[track[@"title"], track[@"artist"], @(llround([track[@"duration"] doubleValue]))]];
@@ -59,6 +79,14 @@ NSArray<NSString *> *IKRecordingFilenames(NSString *bundle, NSDictionary *track)
         name = IKRecordingFile(bundle, candidate);
         if (name) [names addObject:name];
     }
+    // A local import may have been saved before this ID first changed mid-song.
+    if ([track[@"unstablePersistentID"] isEqual:@YES] && [track[@"persistentID"] length]) {
+        candidate = [track mutableCopy];
+        [candidate removeObjectForKey:@"unstablePersistentID"];
+        [candidate removeObjectForKey:@"externalID"];
+        name = IKRecordingFile(bundle,candidate);
+        if (name) [names addObject:name];
+    }
     return names.array;
 }
 
@@ -72,7 +100,7 @@ static NSString *IKRawSignature(NSDictionary *raw) {
 
 BOOL IKConflictingRecordingIDs(NSDictionary *a, NSDictionary *b) {
     for (NSString *key in @[@"externalID", @"persistentID"]) {
-        NSString *x = IKLyricString(a[key],512), *y = IKLyricString(b[key],512);
+        NSString *x = IKReliableID(a,key), *y = IKReliableID(b,key);
         if (x && y) return ![x isEqual:y];
     }
     return NO;
@@ -86,18 +114,18 @@ static NSNumber *IKIndex(id value) {
     NSString *_bundle;
     NSArray<NSString *> *_baselineFields, *_lastFields;
     NSDictionary *_raw, *_written;
-    double _writtenAt;
+    double _writtenAt, _startedAt;
+    BOOL _inheritedTitle;
     NSNumber *_index, *_position;
 }
 
-// A queue or persistent identifier is affirmative evidence of a track boundary.
-// A seek alone, and a change to either car-display field alone, are not.
 - (BOOL)observe:(NSDictionary *)raw album:(NSString *)album queueIndex:(NSNumber *)index
        position:(NSNumber *)position bundle:(NSString *)bundle {
     if (!raw) {
         BOOL changed = _recording != nil;
         _recording = nil; _raw = nil; _lastFields = nil; _baselineFields = nil;
         _carLyric = nil; _lyricField = 0; _index = nil; _position = nil; _bundle = nil;
+        _inheritedTitle = NO;
         return changed;
     }
     index = IKIndex(index);
@@ -105,24 +133,45 @@ static NSNumber *IKIndex(id value) {
     NSString *title = IKLyricString(raw[@"title"],512), *artist = IKLyricString(raw[@"artist"],512);
     NSArray *fields = @[title ?: @"", artist ?: @"", album ?: @""];
     double duration = [raw[@"duration"] doubleValue], previous = [_recording[@"duration"] doubleValue];
-    BOOL sharedID = NO;
-    for (NSString *key in @[@"externalID", @"persistentID"]) {
-        if ([raw[key] length] && [raw[key] isEqual:_recording[key]]) sharedID = YES;
-    }
-    BOOL fresh = !_recording || (bundle.length && _bundle.length && ![_bundle isEqual:bundle]) ||
-        IKConflictingRecordingIDs(raw,_recording) || (index && _index && ![index isEqual:_index]);
-    if (!fresh && !sharedID) {
-        BOOL differentDuration = previous > 0 && duration > 0 && fabs(previous-duration) >= 1.0;
-        BOOL titleChanged = title && [_lastFields[0] length] && ![title isEqual:_lastFields[0]] && ![title isEqual:_baselineFields[0]];
-        BOOL artistChanged = artist && [_lastFields[1] length] && ![artist isEqual:_lastFields[1]] && ![artist isEqual:_baselineFields[1]];
-        BOOL restarted = position && _position.doubleValue > 5 && position.doubleValue <= 2;
-        BOOL playedToEnd = previous > 0 && _position.doubleValue >= previous-2;
-        BOOL changedSongTitle = titleChanged && _lyricField != 1 && [artist isEqual:_baselineFields[1]];
+    BOOL sameDuration = previous > 0 && duration > 0 && fabs(previous-duration) < 1;
+    BOOL titleChanged = title && [_lastFields[0] length] && ![title isEqual:_lastFields[0]];
+    BOOL artistChanged = artist && [_lastFields[1] length] && ![artist isEqual:_lastFields[1]];
+    BOOL newApp = bundle.length && _bundle.length && ![_bundle isEqual:bundle];
+    BOOL newSlot = index && _index && ![index isEqual:_index];
+    BOOL restarted = position && _position.doubleValue > 5 && position.doubleValue <= 2;
+    BOOL stream = [raw[@"live"] isEqual:@YES] || (previous <= 0 && duration <= 0) ||
+                  ([_recording[@"live"] isEqual:@YES] && duration <= 0);
+    BOOL newExternal = [raw[@"externalID"] length] && [_recording[@"externalID"] length] &&
+                       ![raw[@"externalID"] isEqual:_recording[@"externalID"]];
+    BOOL changedPID = [raw[@"persistentID"] length] && [_recording[@"persistentID"] length] &&
+                      ![raw[@"persistentID"] isEqual:_recording[@"persistentID"]];
+    BOOL continuous = position && _position && position.doubleValue > 2 && position.doubleValue >= _position.doubleValue;
+    // Quarantine only with independent continuity evidence. Never suppress a queue change or a restart.
+    BOOL sameSlot = index && _index && [index isEqual:_index];
+    BOOL sparseInSlot = sameSlot && (!position || !_position) && previous > 0 && (sameDuration || duration == 0);
+    BOOL bothFieldsChanged = titleChanged && artistChanged;
+    BOOL unstable = [_recording[@"unstablePersistentID"] isEqual:@YES] ||
+        (changedPID && !newSlot && !newExternal &&
+         ((sameDuration && continuous && (sameSlot || !bothFieldsChanged)) || (sparseInSlot && !bothFieldsChanged)));
+    BOOL sharedID = [raw[@"externalID"] length] && [raw[@"externalID"] isEqual:_recording[@"externalID"]];
+    BOOL sharedPID = !unstable && [raw[@"persistentID"] length] && [raw[@"persistentID"] isEqual:_recording[@"persistentID"]];
+    BOOL fresh = !_recording || newApp || newSlot || newExternal || (changedPID && !unstable && !sharedID) ||
+        (stream && titleChanged) || (previous > 0 && [raw[@"live"] isEqual:@YES] && ![_recording[@"live"] isEqual:@YES]);
+    if (!fresh && !sharedID && changedPID && restarted) fresh = YES;
+    if (!fresh && !sharedID && !sharedPID) {
+        BOOL differentDuration = previous > 0 && duration > 0 && !sameDuration;
+        BOOL changedSongTitle = titleChanged && ![title isEqual:_baselineFields[0]] && _lyricField != 1 &&
+                                [artist isEqual:_baselineFields[1]];
+        BOOL nearEnd = previous > 0 && _position.doubleValue >= previous-2;
         fresh = differentDuration || (restarted && (changedSongTitle || (titleChanged && artistChanged) ||
-                                                      (playedToEnd && (titleChanged || artistChanged))));
+                                                      (nearEnd && (titleChanged || artistChanged))));
     }
+    double now = NSProcessInfo.processInfo.systemUptime;
     if (fresh) {
+        _inheritedTitle = !newApp && !stream && title && ([title isEqual:_baselineFields[0]] || [title isEqual:_lastFields[0]]);
+        _startedAt = now;
         NSMutableDictionary *base = [raw mutableCopy];
+        if (duration <= 0) base[@"live"] = @YES;
         base[@"playSession"] = NSUUID.UUID.UUIDString;
         _recording = [base copy];
         _baselineFields = fields;
@@ -136,16 +185,35 @@ static NSNumber *IKIndex(id value) {
             if (![base[key] length] && [raw[key] length]) base[key] = raw[key];
         }
         if (previous <= 0 && duration > 0) base[@"duration"] = @(duration);
-        if (![base isEqual:_recording]) _recording = [base copy];
+        if ([raw[@"live"] isEqual:@YES]) base[@"live"] = @YES;
+        else if (duration > 0) [base removeObjectForKey:@"live"];
+        if (unstable) base[@"unstablePersistentID"] = @YES;
         NSMutableArray *baseline = [_baselineFields mutableCopy];
         NSMutableArray *current = [fields mutableCopy];
-        NSInteger selected = 0;
-        for (NSUInteger i = 0; i < current.count; i++) {
-            // A sparse media update can carry the playback position or only one display field.
+        for (NSUInteger i=0; i<current.count; i++) {
             if (![current[i] length]) current[i] = _lastFields[i];
             if (![baseline[i] length]) baseline[i] = current[i];
+        }
+        // The boundary packet can still carry the previous song's title.
+        if (_inheritedTitle && now-_startedAt <= 5 && titleChanged && _lyricField != 1) {
+            baseline[0] = title;
+            base[@"title"] = title;
+            base[@"correctedTitle"] = @YES;
+            _inheritedTitle = NO;
+        }
+        if (stream) {
+            // A radio station may keep its content ID across programs and never publish a duration.
+            base[@"artist"] = current[1];
+            baseline = [current mutableCopy];
+            _lyricField = 0;
+        }
+        if (![base isEqual:_recording]) _recording = [base copy];
+        NSInteger selected = 0;
+        // Prefer the established lyric field. On an ambiguous first update, keep the artist-field cue.
+        for (NSNumber *field in @[@2,@1,@3]) {
+            NSUInteger i = field.unsignedIntegerValue-1;
             if ([current[i] isEqual:baseline[i]] || [current[i] isEqual:_lastFields[i]]) continue;
-            if (!selected || _lyricField == (NSInteger)i+1) selected = (NSInteger)i+1;
+            if (!selected || _lyricField == field.integerValue) selected = field.integerValue;
         }
         if (selected) _lyricField = selected;
         if (_lyricField && [current[_lyricField-1] isEqual:baseline[_lyricField-1]]) _lyricField = 0;
@@ -172,6 +240,7 @@ static NSNumber *IKIndex(id value) {
     state[@"wall"] = @(wall);
     if (_carLyric.length) {
         state[@"carLyric"] = _carLyric;
+        state[@"lyricField"] = @(_lyricField);
         state[@"lyricUptime"] = @(_lyricUpdatedAt);
     }
     return state;
@@ -209,10 +278,15 @@ NSDictionary *IKLiveRecording(NSDictionary *s, NSString *bundle, NSDictionary *r
                                          [s[@"duration"] isKindOfClass:NSNumber.class] ? [s[@"duration"] doubleValue] : 0);
     double d = [raw[@"duration"] doubleValue], baselineDuration = [base[@"duration"] doubleValue];
     if (!base || (d > 0 && baselineDuration > 0 && fabs(d-baselineDuration) >= 1)) return nil;
-    if (!(pairedSession && [s[@"playSession"] isEqual:pairedSession]) && !IKSameRecording(raw,base) &&
-        ![s[@"observed"] isEqual:IKRawSignature(raw)]) return nil;
+    if ([s[@"live"] isEqual:@YES] && ((d > 0 && ![raw[@"live"] isEqual:@YES]) ||
+        ([raw[@"title"] length] && ![raw[@"title"] isEqual:base[@"title"]]))) return nil;
     NSMutableDictionary *canonical = [base mutableCopy];
     canonical[@"playSession"] = s[@"playSession"];
+    if ([s[@"unstablePersistentID"] isEqual:@YES]) canonical[@"unstablePersistentID"] = @YES;
+    if ([s[@"correctedTitle"] isEqual:@YES]) canonical[@"correctedTitle"] = @YES;
+    if ([s[@"live"] isEqual:@YES]) canonical[@"live"] = @YES;
+    if (!(pairedSession && [s[@"playSession"] isEqual:pairedSession]) && !IKSameRecording(raw,canonical) &&
+        ![s[@"observed"] isEqual:IKRawSignature(raw)]) return nil;
     return canonical;
 }
 

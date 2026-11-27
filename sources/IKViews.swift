@@ -275,6 +275,22 @@ struct NotifyView: View {
 
 // MARK: - 歌词
 
+private struct PlaybackReportDocument: FileDocument {
+    static let readableContentTypes: [UTType] = [.plainText]
+    var text: String
+
+    init(text: String) { self.text = text }
+    init(configuration: ReadConfiguration) throws {
+        guard let data = configuration.file.regularFileContents, let text = String(data: data, encoding: .utf8) else {
+            throw CocoaError(.fileReadInapplicableStringEncoding)
+        }
+        self.text = text
+    }
+    func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {
+        FileWrapper(regularFileWithContents: Data(text.utf8))
+    }
+}
+
 @available(iOS 16.0, *)
 struct LyricView: View {
     @EnvironmentObject var store: Store
@@ -282,6 +298,10 @@ struct LyricView: View {
     @State private var target: [AnyHashable: Any] = [:]
     @State private var lyricStatus = ""
     @State private var queryingTrack = false
+    @State private var exportingReport = false
+    @State private var reportDocument: PlaybackReportDocument?
+    @State private var selectingSamples = false
+    @State private var sampleReport: String?
 
     private func currentTrack(_ action: @escaping ([AnyHashable: Any]) -> Void) {
         queryingTrack = true
@@ -312,9 +332,33 @@ struct LyricView: View {
             }
 
             Card {
-                Button("为当前歌曲选择歌词文件") { currentTrack { _ in choosingLyrics = true } }
+                Button("为当前歌曲选择歌词文件") {
+                    currentTrack { selection in
+                        if selection["live"] as? Bool == true { lyricStatus = "当前是电台或直播节目，无法按录音绑定时间轴" }
+                        else { selectingSamples = false; choosingLyrics = true }
+                    }
+                }
                     .disabled(queryingTrack)
                 Caption(lyricStatus.isEmpty ? "支持带时间标签的 LRC 和明文 QRC、YRC。" : lyricStatus)
+                Button("导出播放诊断") {
+                    let parts = [IKMusicCenter.playbackDiagnosticReport(), sampleReport].compactMap { $0 }
+                    if !parts.isEmpty {
+                        reportDocument = PlaybackReportDocument(text: parts.joined(separator: "\n"))
+                        exportingReport = true
+                    } else {
+                        lyricStatus = "尚无播放诊断。请先让对应适配器或诊断库运行，再播放要复测的歌曲。"
+                    }
+                }
+                .fileExporter(isPresented: $exportingReport, document: reportDocument, contentType: .plainText,
+                              defaultFilename: "IslandKit-播放诊断") { result in
+                    if case .failure(let error) = result, (error as NSError).code != NSUserCancelledError {
+                        lyricStatus = error.localizedDescription
+                    }
+                }
+                Button("检查已导出的歌词样本文件夹") {
+                    selectingSamples = true
+                    choosingLyrics = true
+                }.disabled(queryingTrack)
                 if target["mode"] as? String == "已绑定本地时间轴" {
                     Button("移除这首歌的绑定") {
                         lyricStatus = IKMusicCenter.removeImport(for: target) ?? "已移除本地时间轴"
@@ -344,19 +388,23 @@ struct LyricView: View {
             }
         }
         .onAppear { currentTrack { _ in } }
-        .fileImporter(isPresented: $choosingLyrics, allowedContentTypes: [.data]) { result in
+        .fileImporter(isPresented: $choosingLyrics, allowedContentTypes: selectingSamples ? [.folder] : [.data]) { result in
             do {
                 let url = try result.get()
                 let selectedTrack = target
+                let inspecting = selectingSamples
                 queryingTrack = true
                 Task {
-                    let message = await Task.detached {
+                    let message: String? = await Task.detached {
                         let scoped = url.startAccessingSecurityScopedResource()
                         defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-                        return IKMusicCenter.importLyrics(at: url, target: selectedTrack)
+                        return inspecting ? IKMusicCenter.sampleReport(at: url) : IKMusicCenter.importLyrics(at: url, target: selectedTrack)
                     }.value
                     queryingTrack = false
-                    if let message = message {
+                    if inspecting {
+                        sampleReport = message
+                        lyricStatus = message == nil ? "样本文件夹无法读取" : "样本已检查，请在离开本页前点“导出播放诊断”保存结果。"
+                    } else if let message = message {
                         lyricStatus = message
                     } else {
                         target = selectedTrack
