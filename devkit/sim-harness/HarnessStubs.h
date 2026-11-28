@@ -14,6 +14,8 @@
 + (void)setPauseGrace:(double)seconds;
 // 模拟系统岛变成这几块（屏幕坐标）：重画灰色的模拟系统岛，并像 SpringBoard 那样通知 IKSystemIslandMonitor
 + (void)setSystemFrames:(NSArray<NSValue *> *)frames;
+// 模拟开始 / 结束录屏（替换了 -[UIScreen isCaptured]，并发出系统的变化通知）
++ (void)setScreenCaptured:(BOOL)captured;
 + (NSString *)describeIsland;
 + (BOOL)expandedContentFitsPresentation;
 + (BOOL)expandedRowsVisible;

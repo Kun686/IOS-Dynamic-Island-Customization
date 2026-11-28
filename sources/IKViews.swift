@@ -115,6 +115,14 @@ struct HomeView: View {
         .background(Color.ikGround.ignoresSafeArea())
         .foregroundColor(.ikText)
         .toolbar(.hidden, for: .navigationBar)
+        .task {
+            // 通知应用默认全部打开：只在第一次（配置里从来没有选过应用）做一次，之后完全听用户的
+            guard !store.s.notifDefaultsApplied else { return }
+            let fill = store.notifAppsEmptyAtLaunch && store.s.notifApps.isEmpty
+            let ids = fill ? await Task.detached { AppList.load(icons: false).map(\.id) }.value : []
+            if fill && store.s.notifApps.isEmpty && !ids.isEmpty { store.s.notifApps = ids }
+            store.s.notifDefaultsApplied = true
+        }
         .onChange(of: scenePhase) { phase in
             if phase == .active { running = IsHUDEnabled() }
         }
@@ -186,6 +194,69 @@ struct RowLabel: View {
 
 // MARK: - 应用通知
 
+// 相册选图。SwiftUI 的 PhotosPicker + loadTransferable 会先把照片拷进本 App 的临时目录，
+// 真机上临时目录写不进去时报“CoreTransferable.TransferableSupportError 错误 0”。
+// 这里用 UIKit 的 PHPickerViewController，直接要图片数据（loadDataRepresentation），
+// 不行再要 UIImage 对象转 PNG，都不经过本 App 的临时目录
+struct IKPhotoError: LocalizedError {
+    var step: String
+    var underlying: NSError?
+    var errorDescription: String? {
+        guard let e = underlying else { return "\(step)失败" }
+        return "\(step)失败（\(e.domain) \(e.code)：\(e.localizedDescription)）"
+    }
+}
+
+func IKLoadImageData(from provider: NSItemProvider, completion: @escaping (Result<Data, Error>) -> Void) {
+    let type = provider.registeredTypeIdentifiers.first { UTType($0)?.conforms(to: .image) == true } ?? UTType.image.identifier
+    provider.loadDataRepresentation(forTypeIdentifier: type) { data, error in
+        if let data = data, !data.isEmpty { completion(.success(data)); return }
+        let first = error as NSError?
+        guard provider.canLoadObject(ofClass: UIImage.self) else {
+            completion(.failure(IKPhotoError(step: "读取图片数据", underlying: first)))
+            return
+        }
+        provider.loadObject(ofClass: UIImage.self) { object, error2 in
+            if let image = object as? UIImage, let png = image.pngData(), !png.isEmpty {
+                completion(.success(png))
+            } else {
+                completion(.failure(IKPhotoError(step: "读取图片数据和图片对象", underlying: (error2 as NSError?) ?? first)))
+            }
+        }
+    }
+}
+
+@available(iOS 16.0, *)
+struct IKPhotoPicker: UIViewControllerRepresentable {
+    // nil 表示取消
+    var onPick: (Result<Data, Error>?) -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(onPick: onPick) }
+
+    func makeUIViewController(context: Context) -> PHPickerViewController {
+        var config = PHPickerConfiguration()
+        config.filter = .images
+        config.selectionLimit = 1
+        let picker = PHPickerViewController(configuration: config)
+        picker.delegate = context.coordinator
+        return picker
+    }
+
+    func updateUIViewController(_ controller: PHPickerViewController, context: Context) {}
+
+    final class Coordinator: NSObject, PHPickerViewControllerDelegate {
+        let onPick: (Result<Data, Error>?) -> Void
+        init(onPick: @escaping (Result<Data, Error>?) -> Void) { self.onPick = onPick }
+
+        func picker(_ picker: PHPickerViewController, didFinishPicking results: [PHPickerResult]) {
+            guard let provider = results.first?.itemProvider else { onPick(nil); return }
+            IKLoadImageData(from: provider) { result in
+                DispatchQueue.main.async { self.onPick(result) }
+            }
+        }
+    }
+}
+
 @available(iOS 16.0, *)
 struct NotifyView: View {
     @EnvironmentObject var store: Store
@@ -197,23 +268,29 @@ struct NotifyView: View {
     @State private var choosingAvatar = false
     @State private var savingAvatar = false
     @State private var avatarStatus = ""
-    @State private var photoItem: PhotosPickerItem?
+    @State private var choosingPhoto = false
     @State private var avatarPreview: UIImage?
+    @State private var avatarDetail = ""
 
     // 头像目录归悬浮进程（root）所有时，先以 root 身份把它改回 mobile 可写，再写图片。
     // 都放在后台线程：修目录要等一个子进程，缩图和写文件也不该卡住界面
-    private static func writeAvatar(_ work: @escaping () -> String?) async -> String? {
-        await Task.detached { () -> String? in
+    private static func writeAvatar(_ work: @escaping () -> IKAvatarSaveResult) async -> (IKAvatarSaveResult, Bool) {
+        await Task.detached { () -> (IKAvatarSaveResult, Bool) in
             let writable = IKEnsureDataDirectoryWritable()
-            guard let failure = work() else { return nil }
-            return writable ? failure
-                : failure + "。数据目录 /var/mobile/Library/IslandKit 仍不可写，请在首页把运行开关关掉再打开后重试。"
+            return (work(), writable)
         }.value
     }
 
-    private func finishAvatarSave(_ message: String?) {
+    private func finish(_ outcome: (IKAvatarSaveResult, Bool), success: String) {
+        let (result, writable) = outcome
         savingAvatar = false
-        avatarStatus = message ?? "已为所选会话保存头像"
+        if result.saved {
+            avatarStatus = result.message.map { success + "。" + $0 } ?? success
+        } else {
+            avatarStatus = (result.message ?? "保存失败")
+                + (writable ? "" : "。数据目录 /var/mobile/Library/IslandKit 仍不可写，请在首页把运行开关关掉再打开后重试。")
+        }
+        avatarDetail = result.detail ?? ""
         refreshAvatarPreview()
     }
 
@@ -221,10 +298,37 @@ struct NotifyView: View {
         let title = avatarTitle
         savingAvatar = true
         Task {
-            let message = await NotifyView.writeAvatar { IKLocalAvatar.shared().setImage(nil, for: title) }
+            let outcome = await NotifyView.writeAvatar { IKLocalAvatar.shared().saveImage(at: nil, for: title) }
+            finish(outcome, success: "已移除绑定")
+        }
+    }
+
+    // 弹出相册或文件选择器之前先确认本 App 的临时目录可写：系统选择器要往里拷文件，
+    // 0.6.6 在真机上就是因为写不进去才报“没有储存到 tmp 的权限”和 CoreTransferable 错误 0
+    private func prepareThenPresent(_ present: @escaping () -> Void) {
+        selectedAvatarTitle = avatarTitle
+        savingAvatar = true
+        Task {
+            let ok = await Task.detached { IKEnsureTemporaryDirectoryWritable() }.value
             savingAvatar = false
-            avatarStatus = message ?? "已移除绑定"
-            refreshAvatarPreview()
+            if !ok { avatarStatus = "本 App 的临时目录不可写，选图可能失败；请在首页把运行开关关掉再打开后重试。" }
+            present()
+        }
+    }
+
+    private func savePhoto(_ result: Result<Data, Error>?) {
+        guard let result = result else { return } // 取消
+        let title = selectedAvatarTitle
+        switch result {
+        case .success(let data):
+            savingAvatar = true
+            Task {
+                let outcome = await NotifyView.writeAvatar { IKLocalAvatar.shared().saveImageData(data, for: title) }
+                finish(outcome, success: "已为所选会话保存头像")
+            }
+        case .failure(let error):
+            avatarStatus = "读取照片失败：\(error.localizedDescription)"
+            avatarDetail = ""
         }
     }
 
@@ -284,13 +388,8 @@ struct NotifyView: View {
                                 refreshAvatarPreview()
                             }
                         HStack(spacing: 16) {
-                            PhotosPicker(selection: $photoItem, matching: .images) {
-                                Text("从相册选择")
-                            }
-                            Button("从文件选择") {
-                                selectedAvatarTitle = avatarTitle
-                                choosingAvatar = true
-                            }
+                            Button("从相册选择") { prepareThenPresent { choosingPhoto = true } }
+                            Button("从文件选择") { prepareThenPresent { choosingAvatar = true } }
                             Spacer(minLength: 0)
                             Button("移除绑定") { removeAvatar() }
                         }
@@ -308,29 +407,19 @@ struct NotifyView: View {
                         }
                         if savingAvatar { ProgressView() }
                         if !avatarStatus.isEmpty { Caption(avatarStatus) }
+                        // 自证信息：来源格式和尺寸、解码路径、存下来的亮度和不透明比例。头像显示发黑时把这一行截图发回来
+                        if !avatarDetail.isEmpty { Caption(avatarDetail).textSelection(.enabled) }
                     }
                     .padding(.top, 8)
                     .onAppear { refreshAvatarPreview() }
                 }
             }
-            .onChange(of: photoItem) { item in
-                guard let item = item else { return }
-                photoItem = nil
-                let title = avatarTitle
-                savingAvatar = true
-                Task {
-                    var message: String?
-                    do {
-                        if let data = try await item.loadTransferable(type: Data.self) {
-                            message = await NotifyView.writeAvatar { IKLocalAvatar.shared().setImageData(data, for: title) }
-                        } else {
-                            message = "没有读到所选照片的数据"
-                        }
-                    } catch {
-                        message = "读取照片失败：\(error.localizedDescription)"
-                    }
-                    finishAvatarSave(message)
+            .sheet(isPresented: $choosingPhoto) {
+                IKPhotoPicker { result in
+                    choosingPhoto = false
+                    savePhoto(result)
                 }
+                .ignoresSafeArea()
             }
             .fileImporter(isPresented: $choosingAvatar, allowedContentTypes: [.image]) { result in
                 do {
@@ -338,12 +427,13 @@ struct NotifyView: View {
                     let title = selectedAvatarTitle
                     savingAvatar = true
                     Task {
-                        let message = await NotifyView.writeAvatar {
+                        // 先整个读进内存再解码（见 IKLocalAvatar），读取期间保持安全作用域
+                        let outcome = await NotifyView.writeAvatar {
                             let scoped = url.startAccessingSecurityScopedResource()
                             defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-                            return IKLocalAvatar.shared().setImage(url, for: title)
+                            return IKLocalAvatar.shared().saveImage(at: url, for: title)
                         }
-                        finishAvatarSave(message)
+                        finish(outcome, success: "已为所选会话保存头像")
                     }
                 } catch {
                     if (error as NSError).code != NSUserCancelledError { avatarStatus = error.localizedDescription }
@@ -352,6 +442,15 @@ struct NotifyView: View {
 
             VStack(alignment: .leading, spacing: 8) {
                 Caption("使用灵动岛通知的应用（已选 \(store.s.notifApps.count) 个）")
+                HStack(spacing: 16) {
+                    Button("全部启用") { store.s.notifApps = apps.map(\.id) }
+                    Button("全部停用") { store.s.notifApps = [] }
+                    Spacer(minLength: 0)
+                }
+                .font(.system(size: 15, weight: .medium))
+                .frame(minHeight: 44)
+                .disabled(loading || apps.isEmpty)
+                Caption("两个按钮作用于下面列表里的全部应用，不受搜索框影响。")
                 TextField("搜索应用", text: $query)
                     .padding(.horizontal, 14)
                     .frame(height: 44)
@@ -435,7 +534,8 @@ struct LyricView: View {
         Task {
             let (text, failure) = await Task.detached { () -> (String, String?) in
                 let history = IKMusicCenter.playbackDiagnosticReport()
-                let text = [history, sample].compactMap { $0 }.joined(separator: "\n")
+                // 第一行是本 App 临时目录和数据目录的情况，备用头像、导出失败时靠它判断是不是权限问题
+                let text = [IKAppStorageDiagnostic(), history, sample].compactMap { $0 }.joined(separator: "\n")
                 guard IKEnsureDataDirectoryWritable() else {
                     return (text, "数据目录 /var/mobile/Library/IslandKit 不可写，请在首页把运行开关关掉再打开后重试")
                 }
@@ -483,13 +583,23 @@ struct LyricView: View {
             Card {
                 SwitchRow(title: "显示歌词", isOn: $store.s.lyric)
                 Caption("默认播放样式")
-                Segmented(value: $store.s.defaultMusicView, options: [(0, "歌词态"), (1, "紧凑态")], accent: accent)
+                Segmented(value: $store.s.defaultMusicView,
+                          options: [(0, "歌词态"), (2, "悬挂歌词"), (1, "紧凑态")], accent: accent)
                     .disabled(!store.s.lyric)
-                Caption("紧凑态只显示封面和音柱。播放时点按或长按屏幕顶部的胶囊可以切换。")
+                Caption(store.s.defaultMusicView == 2
+                        ? "悬挂歌词：胶囊只比系统岛高一点，左边方形专辑图、右边音柱，开孔正下方一行居中的小字歌词。播放时点按或长按顶部的胶囊在它和紧凑态之间切换。"
+                        : "紧凑态只显示封面和音柱。播放时点按或长按屏幕顶部的胶囊可以切换。")
                 Caption("播放器时间轴按播放位置换句。只有蓝牙或车载歌词时，显示播放器上报的当前句。")
             }
 
             Card {
+                SwitchRow(title: "联网匹配逐句歌词", isOn: $store.s.netLyrics)
+                    .onChange(of: store.s.netLyrics) { on in
+                        // 悬浮窗收到开关后马上处理当前这首；联网结果一般几秒内回来，再刷新一次状态
+                        currentTrack { _ in }
+                        if on { DispatchQueue.main.asyncAfter(deadline: .now() + 3) { currentTrack { _ in } } }
+                    }
+                Caption("会把歌名和歌手发给 QQ 音乐/网易云的歌词接口，只取歌词。匹配不到时仍显示播放器上报的当前句；想换版本可以手动选歌词文件。")
                 Button("为当前歌曲选择歌词文件") {
                     currentTrack { selection in
                         if selection["live"] as? Bool == true { lyricStatus = "当前是电台或直播节目，无法按录音绑定时间轴" }
@@ -729,6 +839,11 @@ struct AppearanceView: View {
                         + (store.s.placement == 1
                            ? "自动档在覆盖系统岛时使用最高层级，确保系统岛内容和开孔遮罩都不会压住胶囊；下挂模式的自动档使用标准层级。“更高”“最高”会连隐私指示灯一起盖住。如果切换后岛没有再出现，到首页把运行开关关掉再打开。"
                            : "自动档使用标准层级，已经在系统岛内容之上；“更高”“最高”会连开孔遮罩和隐私指示灯一起盖住。如果切换后岛没有再出现，到首页把运行开关关掉再打开。"))
+            }
+
+            Card {
+                SwitchRow(title: "录屏提示", isOn: $store.s.recordIndicator)
+                Caption("开始和结束录屏时岛上各弹一次提示；录屏期间没放歌时显示红点和录制时长，放歌时在音柱旁边加一个小红点。投屏镜像时系统也会报告“正在录制”，同样会提示。")
             }
 
             Card {

@@ -32,16 +32,36 @@
 - (void)layoutSubviews {
     [super layoutSubviews];
     CGFloat s = MIN(self.bounds.size.width, self.bounds.size.height);
-    self.layer.cornerRadius = s / 2;
+    CGFloat corner = self.squared ? round(s * 0.22) : s / 2;
+    self.layer.cornerRadius = corner;
+    self.layer.cornerCurve = self.squared ? kCACornerCurveContinuous : kCACornerCurveCircular;
     self.disc.bounds = CGRectMake(0, 0, s, s);
     self.disc.center = CGPointMake(CGRectGetMidX(self.bounds), CGRectGetMidY(self.bounds));
-    self.disc.layer.cornerRadius = s / 2;
+    self.disc.layer.cornerRadius = corner;
+    self.hole.hidden = self.squared;
     CGFloat h = MAX(4, s * 0.16);
     self.hole.bounds = CGRectMake(0, 0, h, h);
     self.hole.center = self.disc.center;
     self.hole.layer.cornerRadius = h / 2;
     self.hole.layer.borderWidth = 1;
     self.hole.layer.borderColor = (self.accent ?: [UIColor whiteColor]).CGColor;
+}
+
+// 方形专辑图不转：停掉旋转并转回正位，下次再变回圆形时从 0 度起转
+- (void)setSquared:(BOOL)squared {
+    if (_squared == squared) return;
+    _squared = squared;
+    if (squared) {
+        [self.disc.layer removeAnimationForKey:@"ik.spin"];
+        self.restAngle = 0;
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        self.disc.layer.transform = CATransform3DIdentity;
+        [CATransaction commit];
+    } else {
+        [self applySpin];
+    }
+    [self setNeedsLayout];
 }
 
 - (void)setImage:(UIImage *)image {
@@ -85,6 +105,7 @@
 
 - (void)applySpin {
     CALayer *layer = self.disc.layer;
+    if (self.squared) return;
     if (!self.spinning) { [self freeze]; return; }
     if ([layer animationForKey:@"ik.spin"] || !self.window) return;
     CABasicAnimation *a = [CABasicAnimation animationWithKeyPath:@"transform.rotation.z"];
@@ -551,6 +572,8 @@ typedef NS_ENUM(NSInteger, IKTextKind) {
 @property (nonatomic, strong) IKWedgeView *ringWedge;
 @property (nonatomic) CGSize wedgeSize;                 // 遮罩扇形是按多大的胶囊算的
 @property (nonatomic, weak) UIView *fadingSnapshot;
+@property (nonatomic, strong) UIView *recordDot;       // 录屏红点（录屏状态里在左边，音乐状态里在音柱左边）
+@property (nonatomic, strong) UILabel *recordLabel;    // 录屏时长
 @end
 
 @implementation IKIslandView
@@ -605,7 +628,19 @@ typedef NS_ENUM(NSInteger, IKTextKind) {
 
         _row1 = [IKLineView new];
         _row2 = [IKLineView new];
-        for (UIView *v in @[_cover, _barsView, _iconView, _appLabel, _row1, _row2]) [_content addSubview:v];
+
+        _recordDot = [UIView new];
+        _recordDot.backgroundColor = [UIColor colorWithRed:1 green:0.23 blue:0.19 alpha:1];
+        _recordDot.hidden = YES;
+        _recordLabel = [UILabel new];
+        _recordLabel.font = [UIFont monospacedDigitSystemFontOfSize:14 weight:UIFontWeightSemibold];
+        _recordLabel.textColor = [UIColor colorWithRed:1 green:0.27 blue:0.23 alpha:1];
+        _recordLabel.textAlignment = NSTextAlignmentRight;
+        _recordLabel.adjustsFontSizeToFitWidth = YES;
+        _recordLabel.minimumScaleFactor = 0.7;
+        _recordLabel.text = @"00:00";
+        _recordLabel.hidden = YES;
+        for (UIView *v in @[_cover, _barsView, _iconView, _appLabel, _row1, _row2, _recordDot, _recordLabel]) [_content addSubview:v];
         [self applyFonts];
         self.accent = [UIColor whiteColor];
         [self applyWedgeAnimated:NO];
@@ -642,7 +677,10 @@ typedef NS_ENUM(NSInteger, IKTextKind) {
             break;
     }
     self.row1.textColor = c1;
-    self.row1.alignment = self.textKind == IKTextKindNotif ? 0 : self.lyricAlignment;
+    // 悬挂歌词只有开孔正下方一行，默认居中；选了“自定义”时照样按偏移摆
+    NSInteger align = self.lyricAlignment;
+    if (self.state == IKStateLyricHang && align != 3) align = 1;
+    self.row1.alignment = self.textKind == IKTextKindNotif ? 0 : align;
     self.row2.alignment = self.row1.alignment;
     self.row1.highlightColor = h1;
     self.row1.truncates = truncates;
@@ -655,6 +693,13 @@ typedef NS_ENUM(NSInteger, IKTextKind) {
 
 - (void)applyFonts {
     CGFloat size = self.lyricFontSize;
+    if (self.state == IKStateLyricHang) {
+        // 悬挂歌词的字要小，才能塞进开孔下面那一条
+        CGFloat small = MAX(11, MIN(13, size - 4));
+        self.row1.font = [UIFont systemFontOfSize:small weight:UIFontWeightMedium];
+        self.row2.font = self.row1.font;
+        return;
+    }
     self.row1.font = [UIFont systemFontOfSize:size weight:UIFontWeightBold];
     self.row2.font = [UIFont systemFontOfSize:MAX(11, size - 3) weight:UIFontWeightRegular];
 }
@@ -672,8 +717,47 @@ typedef NS_ENUM(NSInteger, IKTextKind) {
 }
 
 - (void)setState:(IKState)state {
+    BOOL hangChanged = (state == IKStateLyricHang) != (_state == IKStateLyricHang);
     _state = state;
+    self.cover.squared = (state == IKStateLyricHang);
+    [self updateRecordPulse];
+    if (hangChanged) {
+        [self applyFonts];
+        [self applyTextStyles];
+    }
     [self setNeedsLayout];
+}
+
+- (void)setRecording:(BOOL)recording {
+    if (_recording == recording) return;
+    _recording = recording;
+    [self updateRecordPulse];
+    [self setNeedsLayout];
+}
+
+- (void)setRecordElapsed:(NSTimeInterval)recordElapsed {
+    _recordElapsed = recordElapsed;
+    NSInteger t = (NSInteger)MAX(0, floor(recordElapsed));
+    self.recordLabel.text = t >= 3600
+        ? [NSString stringWithFormat:@"%ld:%02ld:%02ld", (long)(t / 3600), (long)(t / 60 % 60), (long)(t % 60)]
+        : [NSString stringWithFormat:@"%02ld:%02ld", (long)(t / 60), (long)(t % 60)];
+}
+
+// 红点一呼一吸地闪，表示正在录
+- (void)updateRecordPulse {
+    CALayer *dot = self.recordDot.layer;
+    BOOL on = self.recording || self.state == IKStateRecord;
+    if (!on) { [dot removeAnimationForKey:@"ik.recordPulse"]; return; }
+    if ([dot animationForKey:@"ik.recordPulse"]) return;
+    CABasicAnimation *a = [CABasicAnimation animationWithKeyPath:@"opacity"];
+    a.fromValue = @1;
+    a.toValue = @0.3;
+    a.duration = 0.8;
+    a.autoreverses = YES;
+    a.repeatCount = HUGE_VALF;
+    a.removedOnCompletion = NO;
+    a.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+    [dot addAnimation:a forKey:@"ik.recordPulse"];
 }
 
 - (void)setCoversCutout:(BOOL)coversCutout {
@@ -1003,6 +1087,8 @@ static CGFloat IKShellRadius(CGSize size, BOOL coversCutout) {
     BOOL compact = (self.state == IKStateMusicCompact);
     BOOL lyric   = (self.state == IKStateLyric);
     BOOL notif   = (self.state == IKStateNotif);
+    BOOL hang    = (self.state == IKStateLyricHang);
+    BOOL rec     = (self.state == IKStateRecord);
     BOOL two     = notif || (lyric && self.lyricLines >= 2);
 
     CGFloat bandHeight = self.cutoutBand > 0 ? self.cutoutBand : 37;
@@ -1014,12 +1100,20 @@ static CGFloat IKShellRadius(CGSize size, BOOL coversCutout) {
     BOOL decorFits = !self.coversCutout || MAX(0, (fit.width - self.cutoutWidth) / 2) >= 32;
     BOOL textFits = self.coversCutout ? fitRows.fits
         : (fit.width >= (notif ? 200 : 104) && fit.height >= (two ? 42 : 24));
-    self.cover.hidden    = !(compact || lyric) || !decorFits || (self.coversCutout && lyric && fitDisc.size.width < 22);
-    self.barsView.hidden = !(compact || lyric) || !decorFits;
+    if (hang) {
+        // 悬挂歌词：文字那一行在开孔下沿，左右夹在封面和音柱之间
+        textFits = self.coversCutout ? (fit.height >= bandHeight + 17 && fit.width >= self.cutoutWidth + 40)
+                                     : (fit.width >= 120 && fit.height >= 22);
+        if (self.coversCutout) decorFits = decorFits && fit.height >= 33;
+    }
+    self.cover.hidden    = !(compact || lyric || hang) || !decorFits || (self.coversCutout && lyric && fitDisc.size.width < 22);
+    self.barsView.hidden = !(compact || lyric || hang) || !decorFits;
     self.iconView.hidden = !notif || !decorFits;
     self.appLabel.hidden = !notif || !decorFits;
-    self.row1.hidden     = !(lyric || notif) || !textFits;
+    self.row1.hidden     = !(lyric || notif || hang) || !textFits;
     self.row2.hidden     = !two || !textFits;
+    self.recordLabel.hidden = !rec || !decorFits;
+    self.recordDot.hidden = !decorFits || !(rec || (self.recording && (compact || lyric || hang)));
 
     if (!self.coversCutout) {
         // 独立胶囊：左边封面或图标，中间文字，右边音柱
@@ -1043,6 +1137,15 @@ static CGFloat IKShellRadius(CGSize size, BOOL coversCutout) {
             self.appLabel.frame = CGRectMake(W - 18 - 96, H / 2 - 19, 96, 16);
             self.row1.frame = CGRectMake(x, H / 2 - 21, MAX(0,w - 102), 22);
             self.row2.frame = CGRectMake(x, H / 2 + 2, w, 18);
+        } else if (hang) {
+            CGFloat a = MAX(0, MIN(20, H - 8));
+            self.cover.frame = CGRectMake(6, (H - a) / 2, a, a);
+            self.barsView.frame = CGRectMake(W - 10 - 16, (H - 12) / 2, 16, 12);
+            CGFloat x = 6 + a + 8;
+            self.row1.frame = CGRectMake(x, (H - 16) / 2, MAX(0, CGRectGetMinX(self.barsView.frame) - 8 - x), 16);
+        } else if (rec) {
+            self.recordDot.frame = CGRectMake(12, (H - 10) / 2, 10, 10);
+            self.recordLabel.frame = CGRectMake(W - 12 - 64, (H - 18) / 2, 64, 18);
         }
     } else {
         // 开孔占据顶部 band 高、居中 cutoutWidth 宽的区域，文字一律放到它下面
@@ -1062,9 +1165,27 @@ static CGFloat IKShellRadius(CGSize size, BOOL coversCutout) {
             self.appLabel.frame = CGRectMake(ax, (band - 16) / 2, MAX(0, W - ax - 16), 16);
             self.row1.frame = rows.first;
             self.row2.frame = rows.second;
+        } else if (hang) {
+            // 方形专辑图和音柱在整个胶囊里上下居中，歌词贴着开孔下沿，左右夹在两者之间
+            CGFloat a = MAX(0, MIN(27, H - 14));
+            self.cover.frame = CGRectMake(10, (H - a) / 2, a, a);
+            self.barsView.frame = CGRectMake(W - 12 - 18, (H - 16) / 2, 18, 16);
+            CGFloat x = 10 + a + 8;
+            self.row1.frame = CGRectMake(x, band - 1, MAX(0, CGRectGetMinX(self.barsView.frame) - 8 - x), 16);
+        } else if (rec) {
+            self.recordDot.frame = CGRectMake(16, (H - 10) / 2, 10, 10);
+            // 时长只放在开孔右边那一块里，不伸进开孔
+            CGFloat lx = MAX(W / 2 + self.cutoutWidth / 2 + 4, W - 14 - 64);
+            self.recordLabel.frame = CGRectMake(lx, (H - 18) / 2, MAX(0, W - 14 - lx), 18);
         }
     }
-    [self placeTextForSize:size lyric:lyric two:two band:bandHeight];
+    if (self.recording && !rec) {
+        // 音乐状态里的录屏提示：音柱左边一个小红点
+        CGRect bars = self.barsView.frame;
+        self.recordDot.frame = CGRectMake(CGRectGetMinX(bars) - 8 - 7, CGRectGetMidY(bars) - 3.5, 7, 7);
+    }
+    self.recordDot.layer.cornerRadius = self.recordDot.bounds.size.width / 2;
+    [self placeTextForSize:size lyric:(lyric || hang) two:two band:(hang ? bandHeight - 2 : bandHeight)];
     self.iconView.layer.cornerRadius = self.iconRound ? self.iconView.bounds.size.width / 2 : 11;
     [self.content layoutIfNeeded];
 }

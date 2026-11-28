@@ -109,6 +109,8 @@ struct IslandPreview: View {
                     .frame(height: 38)
                     .background(Color.black)
                     .clipShape(RoundedRectangle(cornerRadius: 36, style: .continuous))
+                } else if s.defaultMusicView == 2 {
+                    HangCapsulePreview(s: s, accent: accent)
                 } else {
                     LyricCapsulePreview(s: s, accent: accent)
                 }
@@ -201,6 +203,54 @@ struct LyricCapsulePreview: View {
         .frame(height: two ? 76 : 58)
         .background(Color.black)
         .clipShape(RoundedRectangle(cornerRadius: 36, style: .continuous))
+        .accessibilityHidden(true)
+    }
+}
+
+// 悬挂歌词的预览：比系统岛只高一点的胶囊，左边方形专辑图、右边音柱，
+// 中间上半部是开孔（用深灰示意），开孔正下方一行居中的小字歌词
+@available(iOS 16.0, *)
+struct HangCapsulePreview: View {
+    var s: Settings
+    var accent: Color
+
+    private var artwork: some View {
+        RoundedRectangle(cornerRadius: s.placement == 1 ? 6 : 4, style: .continuous)
+            .fill(LinearGradient(colors: [Color(hex: "3A3A44"), accent.opacity(0.7)],
+                                 startPoint: .topLeading, endPoint: .bottomTrailing))
+    }
+
+    var body: some View {
+        let lyricColor = s.previewColor(mode: s.lyricColorMode, custom: s.lyricColor)
+        let small = CGFloat(max(11, min(13, s.lyricFontSize - 4)))
+        let lyric = LyricSample(color: lyricColor, font: .system(size: small, weight: .medium), filled: s.lyricEffect == 1)
+        Group {
+            if s.placement == 1 {
+                ZStack(alignment: .top) {
+                    HStack(spacing: 8) {
+                        artwork.frame(width: 27, height: 27)
+                        Spacer(minLength: 0)
+                        Image(systemName: "waveform").font(.system(size: 16, weight: .semibold)).foregroundColor(accent)
+                    }
+                    .padding(.horizontal, 10)
+                    .frame(maxHeight: .infinity)
+                    // 开孔示意
+                    Capsule().fill(Color(hex: "16161A")).frame(width: 96, height: 28).padding(.top, 5)
+                    lyric.padding(.top, 35)
+                }
+                .frame(width: 250, height: 54)
+            } else {
+                HStack(spacing: 8) {
+                    artwork.frame(width: 20, height: 20)
+                    lyric.frame(maxWidth: .infinity)
+                    Image(systemName: "waveform").font(.system(size: 13, weight: .semibold)).foregroundColor(accent)
+                }
+                .padding(.horizontal, 6)
+                .frame(width: 230, height: 30)
+            }
+        }
+        .background(Color.black)
+        .clipShape(Capsule())
         .accessibilityHidden(true)
     }
 }

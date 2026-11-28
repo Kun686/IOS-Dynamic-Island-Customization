@@ -105,7 +105,13 @@ NSString *const IKSystemIslandDidChangeNotification = @"IKSystemIslandDidChangeN
 @property (nonatomic, strong) UIImage *colorSourceImage; // 已经取过主色的封面
 @property (nonatomic, strong) UIColor *artworkColor;
 @property (nonatomic) IKState shownState;
-@property (nonatomic) BOOL configuredCompact;
+@property (nonatomic) NSInteger configuredStyle;        // 上次按哪种默认播放样式重置过 userCollapsed
+
+// 录屏：UIScreen.captured 变化时提示，录屏期间在岛上显示红点和时长
+@property (nonatomic) BOOL screenRecording;
+@property (nonatomic) CFAbsoluteTime recordingStartedAt;
+@property (nonatomic, strong) NSTimer *recordTimer;
+@property (nonatomic, strong) NSTimer *capturePoll;
 
 // 过渡动画演示：出现 → 停留 → 收起，之后回到正常状态
 @property (nonatomic) BOOL demoActive;
@@ -172,7 +178,14 @@ static void IKDemoRequested(CFNotificationCenterRef c, void *o, CFStringRef n, c
     [nc addObserver:self selector:@selector(musicChanged) name:IKMusicDidChangeNotification object:nil];
     [nc addObserver:self selector:@selector(update) name:UIDeviceOrientationDidChangeNotification object:nil];
     [nc addObserver:self selector:@selector(update) name:IKSystemIslandDidChangeNotification object:nil];
+    [nc addObserver:self selector:@selector(screenCaptureChanged) name:UIScreenCapturedDidChangeNotification object:nil];
     [[UIDevice currentDevice] beginGeneratingDeviceOrientationNotifications];
+    // 悬浮进程不是普通前台应用，录屏状态的通知不一定送得到，再每 1.5 秒自己看一次
+    self.capturePoll = [NSTimer scheduledTimerWithTimeInterval:1.5 target:self selector:@selector(screenCaptureChanged)
+                                                       userInfo:nil repeats:YES];
+    self.screenRecording = [UIScreen mainScreen].isCaptured;
+    if (self.screenRecording) self.recordingStartedAt = CFAbsoluteTimeGetCurrent();
+    [IKPrefs log:[NSString stringWithFormat:@"screenCaptured=%d (launch)", self.screenRecording]];
 
     CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, IKPrefsChanged,
                                     CFSTR(IKPrefsChangedDarwin), NULL,
@@ -302,7 +315,7 @@ static void IKDemoRequested(CFNotificationCenterRef c, void *o, CFStringRef n, c
     IKMusicCenter *m = [IKMusicCenter shared];
     [m advanceLyricsBridge];
     [self trackLyricFields];
-    if (self.island.state == IKStateLyric && !self.demoActive) [self refreshLyricText];
+    if ((self.island.state == IKStateLyric || self.island.state == IKStateLyricHang) && !self.demoActive) [self refreshLyricText];
     if (m.duration > 0) self.island.progress = [m currentElapsed] / m.duration;
 }
 
@@ -385,7 +398,7 @@ static void IKDemoRequested(CFNotificationCenterRef c, void *o, CFStringRef n, c
     [IKPrefs log:[NSString stringWithFormat:@"interaction tap state=%ld notif=%d",
                   (long)self.shownState, self.notifActive]];
     if (self.notifActive) {
-        NSString *bid = self.notifBundle;
+        NSString *bid = [self.notifBundle hasPrefix:@"ik."] ? nil : self.notifBundle; // 录屏提示等内部横幅不打开应用
         [self dismissNotification];
         // 独立进程里没有 SpringBoard 的启动方法，改用 LSApplicationWorkspace 打开应用
         Class cls = NSClassFromString(@"LSApplicationWorkspace");
@@ -410,16 +423,76 @@ static void IKDemoRequested(CFNotificationCenterRef c, void *o, CFStringRef n, c
     if (self.notifActive) {
         [self dismissNotification];
         [IKPrefs log:@"interaction longPress dismissNotification"];
-    } else if (self.shownState == IKStateLyric || self.shownState == IKStateMusicCompact) {
+    } else if (self.shownState == IKStateLyric || self.shownState == IKStateLyricHang || self.shownState == IKStateMusicCompact) {
         self.userCollapsed = !self.userCollapsed;
         [self update];
         [self.island playInteractionPulse];
         [IKPrefs log:[NSString stringWithFormat:@"interaction longPress state=%@",
-                      self.userCollapsed ? @"compact" : @"lyric"]];
+                      self.userCollapsed ? @"compact" : ([IKPrefs shared].musicStyle == 2 ? @"hang" : @"lyric")]];
         UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
         [feedback prepare];
         [feedback impactOccurred];
     }
+}
+
+#pragma mark 录屏
+
+// 录屏提示横幅用的图标：深灰圆底上一个红色圆点
+- (UIImage *)recordIcon {
+    static UIImage *icon;
+    if (icon) return icon;
+    UIGraphicsImageRenderer *r = [[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(88, 88)];
+    icon = [r imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
+        [[UIColor colorWithWhite:0.16 alpha:1] setFill];
+        [[UIBezierPath bezierPathWithOvalInRect:CGRectMake(0, 0, 88, 88)] fill];
+        [[UIColor colorWithWhite:1 alpha:0.9] setStroke];
+        UIBezierPath *ring = [UIBezierPath bezierPathWithOvalInRect:CGRectMake(20, 20, 48, 48)];
+        ring.lineWidth = 4;
+        [ring stroke];
+        [[UIColor colorWithRed:1 green:0.23 blue:0.19 alpha:1] setFill];
+        [[UIBezierPath bezierPathWithOvalInRect:CGRectMake(29, 29, 30, 30)] fill];
+    }];
+    return icon;
+}
+
+static NSString *IKDurationText(NSTimeInterval seconds) {
+    NSInteger t = (NSInteger)MAX(0, round(seconds));
+    return t >= 3600 ? [NSString stringWithFormat:@"%ld:%02ld:%02ld", (long)(t / 3600), (long)(t / 60 % 60), (long)(t % 60)]
+                     : [NSString stringWithFormat:@"%02ld:%02ld", (long)(t / 60), (long)(t % 60)];
+}
+
+// UIScreen.captured：录屏（或投屏镜像）时为 YES。通知和轮询都会调到这里，只在真正变化时处理
+- (void)screenCaptureChanged {
+    BOOL captured = [UIScreen mainScreen].isCaptured;
+    if (captured == self.screenRecording) return;
+    self.screenRecording = captured;
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    NSTimeInterval length = now - self.recordingStartedAt;
+    if (captured) self.recordingStartedAt = now;
+    [IKPrefs log:[NSString stringWithFormat:@"screenCaptured=%d", captured]];
+    IKPrefs *p = [IKPrefs shared];
+    if (p.enabled && p.recordIndicator && !self.suspended) {
+        [self showNotificationWithBundle:@"ik.screenrecord" appName:@"屏幕录制"
+                                   title:(captured ? @"开始录屏" : @"录屏已结束")
+                                 message:(captured ? @"岛上会显示录制时长" : [@"时长 " stringByAppendingString:IKDurationText(length)])
+                                  avatar:[self recordIcon] avatarIsSender:YES];
+    } else {
+        [self update];
+    }
+}
+
+- (void)setRecordTimerRunning:(BOOL)run {
+    if (run && !self.recordTimer) {
+        self.recordTimer = [NSTimer scheduledTimerWithTimeInterval:1 target:self selector:@selector(recordTick)
+                                                          userInfo:nil repeats:YES];
+    } else if (!run && self.recordTimer) {
+        [self.recordTimer invalidate];
+        self.recordTimer = nil;
+    }
+}
+
+- (void)recordTick {
+    self.island.recordElapsed = CFAbsoluteTimeGetCurrent() - self.recordingStartedAt;
 }
 
 #pragma mark 布局与状态
@@ -524,6 +597,8 @@ typedef struct {
         CGFloat w = wide, h = 58;
         if (state == IKStateMusicCompact) { w = 84; h = 34; }
         else if (state == IKStateLyric)   { h = (p.lyricLines >= 2) ? 58 : 46; }
+        else if (state == IKStateLyricHang) { w = MIN(sw - 60, 300); h = 30; }
+        else if (state == IKStateRecord)  { w = 108; h = 30; }
         return CGRectMake((sw - w) / 2, p.belowTop, w, h);
     }
 
@@ -532,7 +607,14 @@ typedef struct {
     CGRect base = [self coverBaseRect];
     CGFloat w = base.size.width, h = base.size.height;
     switch (state) {
-        case IKStateMusicCompact: w = base.size.width + 2 * p.coverCompactSide; break;
+        case IKStateMusicCompact:
+        case IKStateRecord:       w = base.size.width + 2 * p.coverCompactSide; break;
+        // 悬挂歌词：比紧凑态只高出开孔下面那一行字
+        // 高度按开孔下沿算：开孔下面留 18.5 放一行小字（默认参数下比紧凑态高约 17）
+        case IKStateLyricHang:
+            w = base.size.width + 2 * p.coverCompactSide;
+            h = CGRectGetMaxY([self cutoutRect]) - base.origin.y + 18.5;
+            break;
         case IKStateLyric:        w = wide; h += (p.lyricLines >= 2) ? 55 : 39; break;
         // 听歌时来通知：窄一些，右边放得下小封面时再把小封面显示出来
         case IKStateNotif:        w = musicOn ? MIN(wide, 300) : wide; h += 55; break;
@@ -667,6 +749,64 @@ static const UIViewAnimationOptions IKAnimOptions =
     [self resizeTo:target frame:frame duration:duration damping:damping velocity:velocity alongside:settle];
 }
 
+// 按所选过渡风格“弹出来”的弹簧参数（和从开孔里长出来时一样）
+static void IKSpringForStyle(NSInteger style, NSTimeInterval *duration, CGFloat *damping, CGFloat *velocity) {
+    *duration = 0.62; *damping = 0.62; *velocity = 0.9;
+    if (style == 1) { *duration = 0.42; *damping = 1.0; *velocity = 0; }
+    if (style == 4) { *duration = 0.85; *damping = 0.4; *velocity = 1.2; }
+    if (style == 3) { *duration = 0.5; *damping = 0.58; *velocity = 0.8; }
+}
+
+// 音乐 ↔ 通知（以及录屏提示）互相切换。
+// 下挂模式不怕露出系统岛：和以前一样先缩回开孔，再按所选风格长出来。
+// 覆盖模式：先收到“刚好盖住系统岛”的紧凑大小（旧内容的快照同时淡出），再按所选风格弹到新尺寸，
+// 有明显的“收一下、弹出来”，但胶囊始终盖着系统岛。0.6.6 改成直接变形后用户反馈“通知的过渡动画没了”
+- (void)switchToState:(IKState)target frame:(CGRect)frame alongside:(void (^)(void))settle {
+    IKPrefs *p = [IKPrefs shared];
+    NSInteger style = p.transitionStyle;
+    if (p.placement == 0) {
+        [self vanishWithDuration:0.2 completion:^{
+            if (self.shownState != target) return; // 期间状态又变了，交给后一次 update
+            [self appearToState:target frame:frame alongside:settle];
+        }];
+        return;
+    }
+    if (style == 2) {
+        // 淡入风格：原地交叉淡化
+        [self resizeTo:target frame:frame duration:0.45 damping:[self damping:0.85 toward:frame]
+              velocity:0 contentDelay:0.12 alongside:settle];
+        return;
+    }
+    IKIslandView *island = self.island;
+    CGRect pinch = [self frameForState:IKStateMusicCompact musicOn:YES];
+    CGSize now = (island.layer.presentationLayer ?: island.layer).bounds.size;
+    BOOL alreadySmall = fabs(now.width - pinch.size.width) < 3 && fabs(now.height - pinch.size.height) < 3;
+    BOOL targetSmall = fabs(frame.size.width - pinch.size.width) < 3 && fabs(frame.size.height - pinch.size.height) < 3;
+    NSTimeInterval duration; CGFloat damping, velocity;
+    IKSpringForStyle(style, &duration, &damping, &velocity);
+    if (targetSmall) {
+        // 要变成的就是紧凑大小：直接收过去，不回弹
+        [self resizeTo:target frame:frame duration:0.4 damping:1.0 velocity:0 contentDelay:0.1 alongside:settle];
+        return;
+    }
+    if (alreadySmall) {
+        [self resizeTo:target frame:frame duration:duration damping:damping velocity:velocity alongside:settle];
+        return;
+    }
+    NSUInteger token = ++self.transitionToken;
+    [island beginFollowingShell];
+    [UIView animateWithDuration:0.17 delay:0 options:IKAnimOptions | UIViewAnimationOptionCurveEaseIn animations:^{
+        island.transform = CGAffineTransformIdentity;
+        island.frame = pinch;
+        [island layoutIfNeeded];
+        self.miniHolder.alpha = 0;
+    } completion:nil];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.17 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        if (token != self.transitionToken || self.shownState != target) return;
+        [self resizeTo:target frame:frame duration:duration damping:damping velocity:velocity alongside:settle];
+    });
+}
+
 // 消失：淡入和缩放风格原地消失；其余先隐去内容，再整个缩回开孔里面。
 // 收尾（done）按时间触发，不挂在动画的完成回调上：动画块里只要有一个图层的动画走不完，
 // 完成回调就不会来，胶囊会停在收起的位置却一直不隐藏
@@ -733,34 +873,50 @@ static const UIViewAnimationOptions IKAnimOptions =
 
 #pragma mark 状态
 
+// 内容的大类：音乐（紧凑、歌词、悬挂歌词）、通知、录屏。换大类时旧内容淡出、胶囊收一下再弹出
+static NSInteger IKStateKind(IKState state) {
+    switch (state) {
+        case IKStateNotif: return 1;
+        case IKStateRecord: return 2;
+        default: return 0;
+    }
+}
+
 - (void)update {
     if (!self.island) return;
     IKPrefs *p = [IKPrefs shared];
     IKMusicCenter *m = [IKMusicCenter shared];
 
-    // 系统岛展开时（长按、来电等）让开：那时用户要看、要点的是系统岛
-    if (self.configuredCompact != p.defaultCompact) {
-        self.configuredCompact = p.defaultCompact;
-        self.userCollapsed = p.defaultCompact;
+    // 默认播放样式变了：紧凑态默认收起，歌词态和悬挂歌词默认展开
+    if (self.configuredStyle != p.musicStyle) {
+        self.configuredStyle = p.musicStyle;
+        self.userCollapsed = (p.musicStyle == 1);
     }
+    // 系统岛展开时（长按、来电等）让开：那时用户要看、要点的是系统岛
     BOOL usable = p.enabled && !self.suspended && [self isPortrait] && ![self systemIslandState].expanded;
     BOOL musicOn = usable && (p.lyricEnabled || p.spinEnabled) && m.hasTrack
         && (m.isPlaying || CFAbsoluteTimeGetCurrent() < self.pauseGraceUntil);
     BOOL demo = usable && self.demoActive && !self.notifActive;
+    BOOL recordOn = usable && self.screenRecording && p.recordIndicator;
 
+    IKState expanded = (p.musicStyle == 2) ? IKStateLyricHang : IKStateLyric;
     IKState target = IKStateHidden;
     if (usable && self.notifActive) target = IKStateNotif;
     else if (demo) target = IKStateLyric;
     else if (self.demoRetracting) target = IKStateHidden;
-    else if (musicOn) target = (p.lyricEnabled && !self.userCollapsed) ? IKStateLyric : IKStateMusicCompact;
+    else if (musicOn) target = (p.lyricEnabled && !self.userCollapsed) ? expanded : IKStateMusicCompact;
+    else if (recordOn) target = IKStateRecord;
 
-    // 音乐和通知互相切换：在换文字之前给旧内容拍一张快照淡出，新内容随胶囊变形淡入
-    if (target != IKStateHidden && self.shownState != IKStateHidden &&
-        ((target == IKStateNotif) != (self.shownState == IKStateNotif))) [self.island crossfadeContent];
+    // 换一类内容（音乐 ↔ 通知 ↔ 录屏）：在换文字之前给旧内容拍一张快照淡出，新内容随胶囊变形淡入
+    BOOL kindChanged = target != IKStateHidden && self.shownState != IKStateHidden &&
+        IKStateKind(target) != IKStateKind(self.shownState);
+    if (kindChanged) [self.island crossfadeContent];
     // 内容
     CGRect frame = [self frameForState:target musicOn:musicOn];
     self.island.accent = p.accent;
-    self.island.lyricLines = p.lyricLines;
+    // 悬挂歌词只有一行：歌词本身，不显示歌名
+    self.island.lyricLines = (target == IKStateLyricHang) ? 1 : p.lyricLines;
+    self.island.recording = recordOn;
     self.island.lyricAlignment = p.lyricAlignment;
     self.island.lyricOffsetX = p.lyricOffsetX;
     self.island.lyricOffsetY = p.lyricOffsetY;
@@ -784,7 +940,7 @@ static const UIViewAnimationOptions IKAnimOptions =
     self.island.lyricFontSize = p.lyricFontSize;
 
     BOOL playing = m.isPlaying || (demo && !musicOn);
-    BOOL spin = p.spinEnabled && (playing || !p.pauseStopsSpin);
+    BOOL spin = p.spinEnabled && (playing || !p.pauseStopsSpin) && target != IKStateLyricHang;
     [self.island.cover setSpinning:spin period:p.spinSeconds];
     [self.miniCover setSpinning:spin period:p.spinSeconds];
     [self.island setBarsAnimating:playing];
@@ -798,10 +954,13 @@ static const UIViewAnimationOptions IKAnimOptions =
                  lineDuration:1.8
                       elapsed:MAX(0, CFAbsoluteTimeGetCurrent() - self.demoStartedAt - 0.3)
                       playing:YES];
-    } else if (target == IKStateLyric) {
+    } else if (target == IKStateLyric || target == IKStateLyricHang) {
         [self refreshLyricText];
     }
-    BOOL musicShown = (target == IKStateLyric || target == IKStateMusicCompact) && !(demo && !musicOn);
+    if (target == IKStateRecord) self.island.recordElapsed = CFAbsoluteTimeGetCurrent() - self.recordingStartedAt;
+    [self setRecordTimerRunning:(target == IKStateRecord)];
+    BOOL musicShown = (target == IKStateLyric || target == IKStateLyricHang || target == IKStateMusicCompact)
+        && !(demo && !musicOn);
     if (target != IKStateHidden) self.island.showsProgress = p.progressRing && musicShown && m.duration > 0;
     if (musicShown && m.duration > 0) self.island.progress = [m currentElapsed] / m.duration;
     [self setLyricTimerRunning:(musicShown && m.isPlaying)];
@@ -857,16 +1016,13 @@ static const UIViewAnimationOptions IKAnimOptions =
 
     if (sameGeometry) return;
     if (self.outlineShown) [self snapHidden];
-    BOOL wasNotif = (previous == IKStateNotif), isNotif = (target == IKStateNotif);
     BOOL fromHidden = (previous == IKStateHidden || self.island.alpha == 0);
 
     if (fromHidden) {
         [self appearToState:target frame:frame alongside:settleMini];
-    } else if (wasNotif != isNotif) {
-        // 音乐和通知互相切换：胶囊直接变形到新尺寸，不再先缩回开孔再长出来。
-        // 以前缩回开孔的那一下，系统岛自己的音乐显示（专辑图、波形和它的描边）会整个露出来
-        [self resizeTo:target frame:frame duration:0.5 damping:[self damping:0.8 toward:frame]
-              velocity:0.2 contentDelay:0.12 alongside:settleMini];
+    } else if (IKStateKind(previous) != IKStateKind(target)) {
+        // 音乐和通知（或录屏提示）互相切换：收一下再按所选风格弹出来，见 switchToState:
+        [self switchToState:target frame:frame alongside:settleMini];
     } else {
         [self resizeTo:target frame:frame duration:0.45 damping:[self damping:0.78 toward:frame]
               velocity:0.4 alongside:settleMini];

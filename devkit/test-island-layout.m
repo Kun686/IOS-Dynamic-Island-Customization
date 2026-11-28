@@ -204,6 +204,66 @@ int main(void) { @autoreleasepool {
     check([[row1 valueForKey:@"alignment"] integerValue]==0 && [[row2 valueForKey:@"alignment"] integerValue]==0 &&
           near(track.frame.origin.x, 0, 0.01),
           "notification text keeps its own alignment");
+
+    // ---- 悬挂歌词（覆盖模式）：方形封面、右边音柱、开孔下沿一行居中小字 ----
+    v.lyricAlignment = 0;
+    v.lyricOffsetX = 0;
+    v.lyricLines = 1;
+    v.frame = CGRectMake(0, 0, 262, 56.67);
+    v.state = IKStateLyricHang;
+    [v setLyric:@"Where am I without you" title:@"歌名" lineDuration:8 elapsed:2 playing:NO];
+    [v layoutIfNeeded];
+    UIView *bars = [v valueForKey:@"barsView"];
+    check(!v.cover.hidden && !bars.hidden && !row1.hidden && row2.hidden, "hang shows cover, bars and one row");
+    check(v.cover.squared && near(v.cover.layer.cornerRadius, round(27 * 0.22), 0.01) && v.cover.bounds.size.width == 27,
+          "hang uses a rounded-square artwork");
+    check(near(CGRectGetMidY(v.cover.frame), v.bounds.size.height / 2, 0.01) &&
+          near(CGRectGetMidY(bars.frame), v.bounds.size.height / 2, 0.01), "artwork and bars centered vertically");
+    check(near(CGRectGetMinY(row1.frame), 38 - 1, 0.01) && CGRectGetMaxY(row1.frame) <= v.bounds.size.height - 2,
+          "hang lyric sits on the cutout's lower edge");
+    check(CGRectGetMinX(row1.frame) >= CGRectGetMaxX(v.cover.frame) && CGRectGetMaxX(row1.frame) <= CGRectGetMinX(bars.frame),
+          "hang lyric stays between artwork and bars");
+    check([[row1 valueForKey:@"alignment"] integerValue] == 1 && near(textCenter(row1, track), v.bounds.size.width / 2, 0.5),
+          "hang lyric centers on the shell midline even with left alignment chosen");
+    check(((UILabel *)[row1 valueForKey:@"baseLabel"]).font.pointSize < 14, "hang lyric uses a small font");
+    v.lyricAlignment = 3;
+    v.lyricOffsetX = 10;
+    [v layoutIfNeeded];
+    check(near(textCenter(row1, track), v.bounds.size.width / 2 + 10, 0.5), "hang honors the custom offset");
+    v.lyricOffsetX = 120;
+    [v layoutIfNeeded];
+    check(near(CGRectGetMaxX(track.frame), row1.bounds.size.width, 0.01), "hang offset stops before the bars");
+    v.lyricAlignment = 0;
+    v.lyricOffsetX = 0;
+    [v layoutContentForSize:CGSizeMake(200, 45)];
+    check(row1.hidden, "hang text hidden while the shell is too short");
+    [v layoutIfNeeded];
+    v.state = IKStateMusicCompact;
+    v.frame = CGRectMake(0, 0, 260, 39.67);
+    [v layoutIfNeeded];
+    check(!v.cover.squared && near(v.cover.layer.cornerRadius, 13.5, 0.01), "compact goes back to the round disc");
+
+    // ---- 录屏 ----
+    UIView *dot = [v valueForKey:@"recordDot"];
+    UILabel *recLabel = [v valueForKey:@"recordLabel"];
+    check(dot.hidden && recLabel.hidden, "no record marks while not recording");
+    v.recording = YES;
+    [v layoutIfNeeded];
+    check(!dot.hidden && recLabel.hidden && CGRectGetMaxX(dot.frame) <= CGRectGetMinX(bars.frame) &&
+          near(CGRectGetMidY(dot.frame), CGRectGetMidY(bars.frame), 0.01), "recording dot beside the bars while music plays");
+    v.state = IKStateRecord;
+    v.recordElapsed = 83.4;
+    [v layoutIfNeeded];
+    check(!dot.hidden && !recLabel.hidden && v.cover.hidden && bars.hidden && row1.hidden, "record state shows dot and timer only");
+    check([recLabel.text isEqualToString:@"01:23"], "record timer text");
+    check(CGRectGetMaxX(dot.frame) <= (v.bounds.size.width - v.cutoutWidth) / 2 &&
+          CGRectGetMinX(recLabel.frame) >= (v.bounds.size.width + v.cutoutWidth) / 2, "record marks stay outside the cutout");
+    v.recordElapsed = 3725;
+    check([recLabel.text isEqualToString:@"1:02:05"], "record timer over an hour");
+    v.recording = NO;
+    v.state = IKStateMusicCompact;
+    [v layoutIfNeeded];
+    check(dot.hidden, "dot gone after recording stops");
     NSLog(@"UIKit layout: %lu checks passed", (unsigned long)checks);
     return 0;
 } }

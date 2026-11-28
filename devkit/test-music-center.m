@@ -124,6 +124,197 @@ static void testSampleFolder(void) {
     check(![IKMusicCenter sampleReportAtURL:[root URLByAppendingPathComponent:@"missing"]], "missing folder is distinct from no matches");
 }
 
+#pragma mark 备用头像：各种来源格式
+
+// 现造一张 w×h 的测试图。kind 0：四色（左上红、右上绿、左下蓝、右下白）；1：全黑；2：全透明；
+// 3：透明底上一个红色实心圆。bits 是每个颜色分量的位数（8 或 16）
+static CGImageRef avatarFixture(size_t w, size_t h, size_t bits, int kind) CF_RETURNS_RETAINED {
+    CGColorSpaceRef srgb = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+    CGBitmapInfo info = (CGBitmapInfo)kCGImageAlphaPremultipliedLast | (bits == 16 ? kCGBitmapByteOrderDefault : kCGBitmapByteOrder32Big);
+    CGContextRef c = CGBitmapContextCreate(NULL, w, h, bits, 0, srgb, info);
+    CGColorSpaceRelease(srgb);
+    CGContextClearRect(c, CGRectMake(0, 0, w, h));
+    CGFloat hw = w / 2.0, hh = h / 2.0;   // 坐标原点在左下
+    if (kind == 0) {
+        CGContextSetRGBFillColor(c, 1, 0, 0, 1); CGContextFillRect(c, CGRectMake(0, hh, hw, hh));
+        CGContextSetRGBFillColor(c, 0, 1, 0, 1); CGContextFillRect(c, CGRectMake(hw, hh, hw, hh));
+        CGContextSetRGBFillColor(c, 0, 0, 1, 1); CGContextFillRect(c, CGRectMake(0, 0, hw, hh));
+        CGContextSetRGBFillColor(c, 1, 1, 1, 1); CGContextFillRect(c, CGRectMake(hw, 0, hw, hh));
+    } else if (kind == 1) {
+        CGContextSetRGBFillColor(c, 0, 0, 0, 1); CGContextFillRect(c, CGRectMake(0, 0, w, h));
+    } else if (kind == 3) {
+        CGContextSetRGBFillColor(c, 1, 0, 0, 1); CGContextFillEllipseInRect(c, CGRectMake(w * 0.25, h * 0.25, w * 0.5, h * 0.5));
+    }
+    CGImageRef image = CGBitmapContextCreateImage(c);
+    CGContextRelease(c);
+    return image;
+}
+
+// 按 type 编码，orientation 写进 EXIF/TIFF 方向（1 表示不写）。编码器不支持这种格式时返回 nil
+static NSData *avatarEncode(CGImageRef image, NSString *type, int orientation) {
+    NSMutableData *data = [NSMutableData data];
+    CGImageDestinationRef out = CGImageDestinationCreateWithData((__bridge CFMutableDataRef)data, (__bridge CFStringRef)type, 1, NULL);
+    if (!out) return nil;
+    NSDictionary *props = orientation > 1 ? @{(__bridge id)kCGImagePropertyOrientation:@(orientation)} : @{};
+    CGImageDestinationAddImage(out, image, (__bridge CFDictionaryRef)props);
+    BOOL ok = CGImageDestinationFinalize(out);
+    CFRelease(out);
+    return ok && data.length ? data : nil;
+}
+
+// 把保存下来的头像读回来：尺寸、文件属性，以及四个象限中心和正中心的颜色（R G B W K=黑 .=透明 ?=其他）
+static NSString *avatarReadBack(NSURL *file, size_t *width, size_t *height, NSDictionary **props) {
+    CGImageSourceRef src = CGImageSourceCreateWithURL((__bridge CFURLRef)file, NULL);
+    if (!src) return nil;
+    if (props) *props = CFBridgingRelease(CGImageSourceCopyPropertiesAtIndex(src, 0, NULL));
+    CGImageRef image = CGImageSourceCreateImageAtIndex(src, 0, NULL);
+    CFRelease(src);
+    if (!image) return nil;
+    size_t w = CGImageGetWidth(image), h = CGImageGetHeight(image);
+    CGColorSpaceRef srgb = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+    CGContextRef c = CGBitmapContextCreate(NULL, w, h, 8, w * 4, srgb, (CGBitmapInfo)kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big);
+    CGColorSpaceRelease(srgb);
+    CGContextClearRect(c, CGRectMake(0, 0, w, h));
+    CGContextDrawImage(c, CGRectMake(0, 0, w, h), image);
+    CGImageRelease(image);
+    const uint8_t *base = CGBitmapContextGetData(c);
+    size_t stride = CGBitmapContextGetBytesPerRow(c);
+    NSMutableString *out = [NSMutableString string];
+    size_t points[5][2] = {{w / 4, h / 4}, {w * 3 / 4, h / 4}, {w / 4, h * 3 / 4}, {w * 3 / 4, h * 3 / 4}, {w / 2, h / 2}};
+    for (int i = 0; i < 5; i++) {   // 内存里第 0 行是图片的最上面一行
+        const uint8_t *p = base + points[i][1] * stride + points[i][0] * 4;
+        unsigned r = p[0], g = p[1], b = p[2], a = p[3];
+        char k = a < 16 ? '.' : (r > 200 && g > 200 && b > 200) ? 'W' : (r < 40 && g < 40 && b < 40) ? 'K'
+            : (r > 170 && g < 90 && b < 90) ? 'R' : (g > 170 && r < 90 && b < 90) ? 'G' : (b > 170 && r < 90 && g < 90) ? 'B' : '?';
+        [out appendFormat:@"%c", k];
+    }
+    CGContextRelease(c);
+    *width = w; *height = h;
+    return out;
+}
+
+static void testAvatarFormats(NSString *root) {
+    NSFileManager *fm = NSFileManager.defaultManager;
+    IKLocalAvatar *avatars = [[IKLocalAvatar alloc] initWithDirectory:[NSURL fileURLWithPath:[root stringByAppendingPathComponent:@"formats"]]];
+    NSString *title = @"格式会话";
+    size_t w = 0, h = 0;
+    NSDictionary *props = nil;
+
+    // 方向：左上红、右上绿、左下蓝、右下白的 200×100 原始像素，按 EXIF 1…8 摆正后四个象限（左上 右上 左下 右下）应该是
+    NSArray<NSString *> *expected = @[@"RGBW", @"GRWB", @"WBGR", @"BWRG", @"RBGW", @"BRWG", @"WGBR", @"GWRB"];
+    CGImageRef quad = avatarFixture(200, 100, 8, 0);
+    for (int o = 1; o <= 8; o++) {
+        NSData *tiff = avatarEncode(quad, @"public.tiff", o);
+        for (NSInteger fault = 0; fault <= 2; fault++) {
+            [avatars setValue:@(fault) forKey:@"simulatedThumbnailFault"];
+            IKAvatarSaveResult *r = [avatars saveImageData:tiff forTitle:title];
+            NSString *seen = r.saved ? avatarReadBack([avatars imageForTitle:title], &w, &h, NULL) : nil;
+            BOOL turned = o >= 5;
+            BOOL ok = r.saved && !r.message && [[seen substringToIndex:4] isEqual:expected[o - 1]] &&
+                w == (turned ? 80 : 160) && h == (turned ? 160 : 80) &&
+                [r.detail containsString:fault == 0 ? @"缩略图接口，" : fault == 1 ? @"整图解码（缩略图接口没有结果）" : @"整图解码（缩略图接口全黑）"];
+            if (!ok) fprintf(stderr, "orientation %d fault %ld: saved=%d seen=%s %zux%zu detail=%s\n", o, (long)fault, r.saved,
+                             seen.UTF8String, w, h, r.detail.UTF8String);
+            check(ok, "avatar is turned upright for every EXIF orientation on both decode routes");
+        }
+    }
+    [avatars setValue:@0 forKey:@"simulatedThumbnailFault"];
+    CGImageRelease(quad);
+
+    // 大图走整图解码时按 8 倍抽样解码，方向照样摆正
+    CGImageRef big = avatarFixture(3000, 2000, 8, 0);
+    NSData *bigJPEG = avatarEncode(big, @"public.jpeg", 8);
+    CGImageRelease(big);
+    [avatars setValue:@1 forKey:@"simulatedThumbnailFault"];
+    IKAvatarSaveResult *rBig = [avatars saveImageData:bigJPEG forTitle:title];
+    [avatars setValue:@0 forKey:@"simulatedThumbnailFault"];
+    NSString *seenBig = avatarReadBack([avatars imageForTitle:title], &w, &h, NULL);
+    check(rBig.saved && [seenBig hasPrefix:@"GWRB"] && w == 107 && h == 160 && [rBig.detail containsString:@"public.jpeg 3000×2000"],
+          "large JPEG on the full-decode route is subsampled and turned upright");
+
+    // HEIC（带方向 6，相机竖拍的样子）。本机没有 HEIC 编码器时跳过
+    CGImageRef photo = avatarFixture(400, 300, 8, 0);
+    NSData *heic = avatarEncode(photo, @"public.heic", 6);
+    if (heic) {
+        NSURL *heicFile = [NSURL fileURLWithPath:[root stringByAppendingPathComponent:@"photo.heic"]];
+        [heic writeToURL:heicFile atomically:YES];
+        IKAvatarSaveResult *r = [avatars saveImageAtURL:heicFile forTitle:title];
+        NSString *seen = avatarReadBack([avatars imageForTitle:title], &w, &h, &props);
+        check(r.saved && !r.message && [seen hasPrefix:@"BRWG"] && w == 120 && h == 160 &&
+              [r.detail containsString:@"public.heic 400×300"] && [r.detail containsString:@"方向6"] &&
+              [r.detail containsString:@"头像 120×160"] && [r.detail containsString:@"已回读校验"],
+              "HEIC file is read whole, turned upright and described");
+        check([props[(__bridge id)kCGImagePropertyDepth] intValue] == 8 &&
+              [props[(__bridge id)kCGImagePropertyColorModel] isEqual:(__bridge id)kCGImagePropertyColorModelRGB],
+              "stored avatar is an 8-bit RGB PNG");
+    } else {
+        printf("note: no HEIC encoder on this host, HEIC case skipped\n");
+    }
+    CGImageRelease(photo);
+
+    // 16 位 PNG：存下来是 8 位
+    CGImageRef deep = avatarFixture(320, 320, 16, 0);
+    NSData *png16 = avatarEncode(deep, @"public.png", 1);
+    CGImageRelease(deep);
+    IKAvatarSaveResult *r16 = [avatars saveImageData:png16 forTitle:title];
+    NSString *seen16 = avatarReadBack([avatars imageForTitle:title], &w, &h, &props);
+    check(r16.saved && [r16.detail containsString:@"16位"] && [seen16 hasPrefix:@"RGBW"] && w == 160 && h == 160 &&
+          [props[(__bridge id)kCGImagePropertyDepth] intValue] == 8, "16-bit PNG is stored as an 8-bit avatar");
+    NSData *good = [NSData dataWithContentsOfURL:[avatars imageForTitle:title]];
+    NSString *described = [IKLocalAvatar describeImageData:good];
+    check([described hasPrefix:@"160×160 平均亮度 "] && [described containsString:@"不透明 100%"], "describe a stored avatar");
+    check(![IKLocalAvatar describeImageData:[@"x" dataUsingEncoding:NSUTF8StringEncoding]], "describe rejects non-images");
+
+    // 透明底上的红圆：保存，角上透明、中间红
+    CGImageRef dot = avatarFixture(300, 300, 8, 3);
+    IKAvatarSaveResult *rDot = [avatars saveImageData:avatarEncode(dot, @"public.png", 1) forTitle:title];
+    CGImageRelease(dot);
+    NSString *seenDot = avatarReadBack([avatars imageForTitle:title], &w, &h, NULL);
+    check(rDot.saved && !rDot.message && [rDot.detail containsString:@"带透明"] && [seenDot isEqual:@"....R"] &&
+          ![rDot.detail containsString:@"不透明 100%"], "transparent picture keeps its alpha");
+    good = [NSData dataWithContentsOfURL:[avatars imageForTitle:title]];
+
+    // 全透明：不保存，原来那张不变
+    CGImageRef clear = avatarFixture(120, 120, 8, 2);
+    IKAvatarSaveResult *rClear = [avatars saveImageData:avatarEncode(clear, @"public.png", 1) forTitle:title];
+    CGImageRelease(clear);
+    check(!rClear.saved && [rClear.message containsString:@"全透明"] &&
+          [[NSData dataWithContentsOfURL:[avatars imageForTitle:title]] isEqual:good], "fully transparent picture is refused and old avatar kept");
+
+    // 全黑：照常保存但给出提示；缩略图接口给黑图时也能分清两条路都黑
+    CGImageRef black = avatarFixture(200, 200, 8, 1);
+    NSData *blackJPEG = avatarEncode(black, @"public.jpeg", 1);
+    CGImageRelease(black);
+    IKAvatarSaveResult *rBlack = [avatars saveImageData:blackJPEG forTitle:title];
+    check(rBlack.saved && [rBlack.message isEqual:@"图片看起来是全黑的"] && [rBlack.detail containsString:@"public.jpeg"] &&
+          [rBlack.detail containsString:@"缩略图接口（整图解码也是全黑）"], "a genuinely black picture is saved with a warning");
+    [avatars setValue:@1 forKey:@"simulatedThumbnailFault"];
+    rBlack = [avatars saveImageData:blackJPEG forTitle:title];
+    check(rBlack.saved && [rBlack.message isEqual:@"图片看起来是全黑的"] && [rBlack.detail containsString:@"整图解码（缩略图接口没有结果）"],
+          "black picture without a thumbnail still names the route");
+    [avatars setValue:@0 forKey:@"simulatedThumbnailFault"];
+
+    // 文件入口：目录、超过 16 MB、空文件、不是图片
+    IKAvatarSaveResult *rDir = [avatars saveImageAtURL:[NSURL fileURLWithPath:root isDirectory:YES] forTitle:title];
+    check(!rDir.saved && [rDir.message isEqual:@"请选择一个图片文件"], "a folder is not an image file");
+    NSString *huge = [root stringByAppendingPathComponent:@"huge.png"];
+    [fm createFileAtPath:huge contents:nil attributes:nil];
+    truncate(huge.fileSystemRepresentation, 17 * 1024 * 1024);
+    IKAvatarSaveResult *rHuge = [avatars saveImageAtURL:[NSURL fileURLWithPath:huge] forTitle:title];
+    check(!rHuge.saved && [rHuge.message containsString:@"16 MB"], "files above 16 MB are refused before decoding");
+    NSString *empty = [root stringByAppendingPathComponent:@"empty.png"];
+    [fm createFileAtPath:empty contents:[NSData data] attributes:nil];
+    IKAvatarSaveResult *rEmpty = [avatars saveImageAtURL:[NSURL fileURLWithPath:empty] forTitle:title];
+    check(!rEmpty.saved && [rEmpty.message containsString:@"文件是空的"], "an empty file names the reason");
+    IKAvatarSaveResult *rText = [avatars saveImageData:[@"not an image" dataUsingEncoding:NSUTF8StringEncoding] forTitle:title];
+    check(!rText.saved && [rText.message containsString:@"不是能识别的图片格式"], "non-image data names the reason");
+    IKAvatarSaveResult *rGone = [avatars saveImageAtURL:[NSURL fileURLWithPath:[root stringByAppendingPathComponent:@"missing.png"]] forTitle:title];
+    check(!rGone.saved && [rGone.message hasPrefix:@"图片无法读取："] && [rGone.message containsString:@"errno"], "a missing file names errno");
+    IKAvatarSaveResult *rRemove = [avatars saveImageAtURL:nil forTitle:title];
+    IKAvatarSaveResult *rRemoveAgain = [avatars saveImageAtURL:nil forTitle:title];
+    check(rRemove.saved && rRemoveAgain.saved && ![avatars imageForTitle:title], "removing twice is fine");
+}
+
 int main(int argc, const char **argv) { @autoreleasepool {
     if (argc != 2) return 2;
     store = [@(argv[1]) stringByAppendingPathComponent:NSUUID.UUID.UUIDString];
@@ -290,6 +481,7 @@ int main(int argc, const char **argv) { @autoreleasepool {
     check([lockedMessage containsString:@"无法创建目录"] && [lockedMessage containsString:@"WeChatAvatars"],
           "an unwritable data directory names the failing step and path");
     chmod(lockedRoot.fileSystemRepresentation, 0755);
+    testAvatarFormats(store);
     if (![NSFileManager.defaultManager removeItemAtPath:store error:nil]) return 2;
     printf("HUD and settings: %d checks passed\n",count);
     return 0;

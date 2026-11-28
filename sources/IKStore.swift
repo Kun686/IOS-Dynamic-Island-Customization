@@ -27,7 +27,10 @@ struct Settings {
     var lyricAlignment = 0     // 0 靠左 / 1 居中（按整个胶囊的中线）/ 2 靠右 / 3 自定义
     var lyricOffsetX = 0.0     // 自定义：文字中心相对胶囊中线的左右偏移，正数向右
     var lyricOffsetY = 0.0     // 自定义：上下偏移，正数向下
-    var defaultMusicView = 0
+    var defaultMusicView = 0   // 0 歌词态 / 1 紧凑态 / 2 悬挂歌词
+    var recordIndicator = true // 录屏时在岛上提示
+    var netLyrics = true       // 联网匹配逐句歌词时间轴
+    var notifDefaultsApplied = false // “通知应用默认全部打开”是否已经做过（只做一次，之后尊重用户的选择）
     var spinSeconds = 8.0
     var notifDuration = 5.0
     var notifApps: [String] = []
@@ -49,7 +52,10 @@ struct Settings {
         if let choice = d["lyricAlignment"] as? Int, (0...3).contains(choice) { lyricAlignment = choice }
         lyricOffsetX = max(-120, min(120, d["lyricOffsetX"] as? Double ?? lyricOffsetX))
         lyricOffsetY = max(-12, min(12, d["lyricOffsetY"] as? Double ?? lyricOffsetY))
-        defaultMusicView = (d["defaultMusicView"] as? Int == 1) ? 1 : 0
+        if let style = d["defaultMusicView"] as? Int, (0...2).contains(style) { defaultMusicView = style }
+        recordIndicator = d["recordIndicator"] as? Bool ?? recordIndicator
+        netLyrics = d["netLyrics"] as? Bool ?? netLyrics
+        notifDefaultsApplied = d["notifDefaultsApplied"] as? Bool ?? notifDefaultsApplied
         placement = d["placement"] as? Int ?? placement
         coverExtraWidth = d["coverExtraWidth"] as? Double ?? coverExtraWidth
         coverExtraHeight = d["coverExtraHeight"] as? Double ?? coverExtraHeight
@@ -88,6 +94,7 @@ struct Settings {
             "coverExtraWidth": coverExtraWidth, "coverExtraHeight": coverExtraHeight,
             "coverOffsetY": coverOffsetY, "calibrateUntil": calibrateUntil,
             "notifTitleColor": notifTitleColor, "notifMessageColor": notifMessageColor,
+            "recordIndicator": recordIndicator, "netLyrics": netLyrics, "notifDefaultsApplied": notifDefaultsApplied,
         ]
     }
 
@@ -110,9 +117,13 @@ final class Store: ObservableObject {
         didSet { save() }
     }
     @Published var saveFailed = false
+    // 启动时配置文件里的通知应用列表是不是空的（文件不存在也算空）。在 init 里第一次写文件之前记下来
+    let notifAppsEmptyAtLaunch: Bool
 
     init() {
-        if let d = NSDictionary(contentsOfFile: Store.path) as? [String: Any] {
+        let d = NSDictionary(contentsOfFile: Store.path) as? [String: Any]
+        notifAppsEmptyAtLaunch = ((d?["notifApps"] as? [String]) ?? []).isEmpty
+        if let d = d {
             s = Settings(dict: d)
         }
         // 上次如果在校准时被杀掉，描边不能一直留在屏幕上
@@ -164,7 +175,8 @@ enum AppList {
     // 通过 LSApplicationWorkspace 读取已安装的应用。
     // 巨魔安装的应用在系统里登记为 System 类型，所以不能只取 User 类型；
     // 这里取所有未隐藏的应用，自己安装的（含巨魔安装的）排在前面，系统自带的排在后面。
-    static func load() -> [AppInfo] {
+    // icons 为 NO 时不取图标，只要应用列表（启动时“默认全部打开”用，快很多）
+    static func load(icons: Bool = true) -> [AppInfo] {
         guard let cls = NSClassFromString("LSApplicationWorkspace") as? NSObject.Type,
               let ws = cls.perform(NSSelectorFromString("defaultWorkspace"))?.takeUnretainedValue() as? NSObject,
               let proxies = ws.perform(NSSelectorFromString("allApplications"))?.takeUnretainedValue() as? [NSObject]
@@ -180,7 +192,7 @@ enum AppList {
             if name.isEmpty { continue }
             let path = (read(p, "bundleURL") as? URL)?.path ?? ""
             let installed = (read(p, "applicationType") as? String) == "User" || path.contains("/containers/Bundle/Application/")
-            let icon = UIImage._applicationIconImage(forBundleIdentifier: id, format: 0, scale: scale)
+            let icon = icons ? UIImage._applicationIconImage(forBundleIdentifier: id, format: 0, scale: scale) : nil
             let info = AppInfo(id: id, name: name, icon: icon)
             if installed { mine.append(info) } else { system.append(info) }
         }

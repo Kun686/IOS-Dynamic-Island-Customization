@@ -42,7 +42,7 @@
 
 - (void)application:(UIApplication *)application performActionForShortcutItem:(UIApplicationShortcutItem *)shortcutItem completionHandler:(void (^)(BOOL succeeded))completionHandler
 {
-    if ([shortcutItem.type isEqualToString:@"ch.xxtou.shortcut.toggle-hud"])
+    if ([shortcutItem.type isEqualToString:@"com.YiChen.LDDMH.shortcut.toggle-hud"])
     {
         [self setupAndNotifyToggleHUDAfterLaunchWithAction:nil];
     }

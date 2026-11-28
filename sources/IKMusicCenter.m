@@ -2,7 +2,11 @@
 #import "MediaRemote.h"
 #import "IKPlaybackDiagnostic.h"
 #import "IKPrefs.h"
+#import "IKNetLyrics.h"
 #import <objc/message.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 NSString *const IKMusicDidChangeNotification = @"IKMusicDidChangeNotification";
 
@@ -54,6 +58,102 @@ static NSString *IKAdjacentFile(NSString *playerPath, NSString *name) {
     return [playerPath.stringByDeletingLastPathComponent stringByAppendingPathComponent:name];
 }
 
+// ---- 联网时间轴 ----
+static NSString *const IKNetTimelineMode = @"联网时间轴（QQ 音乐/网易云）";
+// 换歌后等这么久再查：IKRecordingTracker 在换歌后 5 秒内可能纠正继承来的旧歌名
+static double IKNetSettleSeconds = 6;
+// 缓存目录里最多留这么多首，超出时删最旧的
+static NSUInteger IKNetCacheLimit = 400;
+
+static NSString *IKNetDirectory(void) {
+    return [IKDataDir stringByAppendingPathComponent:@"NetTimelines"];
+}
+
+static NSArray<NSURL *> *IKNetURLs(NSString *bid, NSDictionary *track) {
+    NSURL *directory = [NSURL fileURLWithPath:IKNetDirectory() isDirectory:YES];
+    NSMutableArray *urls = [NSMutableArray array];
+    for (NSString *name in IKRecordingFilenames(bid, track)) [urls addObject:[directory URLByAppendingPathComponent:name]];
+    return urls;
+}
+
+// 悬浮进程按 IKPrefs 判断。单测宿主的 IKPrefs 只桩了 +log:，没有 +shared 时按关闭处理，也就不会联网
+static BOOL IKNetLyricsEnabled(void) {
+    return [IKPrefs respondsToSelector:@selector(shared)] && [IKPrefs shared].netLyrics;
+}
+
+// 设置 App 里的 IKPrefs 不跟着开关刷新，直接读配置文件；没写过这个键就是默认的打开
+static BOOL IKNetLyricsEnabledOnDisk(void) {
+    id value = [NSDictionary dictionaryWithContentsOfFile:IKPrefsPath][@"netLyrics"];
+    return [value isKindOfClass:NSNumber.class] ? [value boolValue] : YES;
+}
+
+static BOOL IKNetProviderName(id value) {
+    return [value isEqual:IKNetProviderQQ] || [value isEqual:IKNetProviderNetease];
+}
+
+// 日志只记播放器、提供方、结果、句数和时长差，不记歌名、歌手和歌词
+static NSString *IKNetLogLine(NSString *bid, NSString *provider, NSString *result, NSUInteger lines, id delta) {
+    BOOL known = [delta isKindOfClass:NSNumber.class] && [delta doubleValue] >= 0 && [delta doubleValue] < 1000;
+    return [NSString stringWithFormat:@"net lyrics app=%@ provider=%@ result=%@ lines=%lu dt=%@", bid, provider, result,
+            (unsigned long)MIN(lines, (NSUInteger)9999), known ? [NSString stringWithFormat:@"%.1f", [delta doubleValue]] : @"-"];
+}
+
+// 悬浮进程是 root。照 IKRepairDataDirectory()：不碰符号链接和普通文件，只动目录本身，
+// 属主交给 mobile、权限至少 0755，设置 App 才读得到；root 写出的 0644 文件 mobile 可读
+static BOOL IKPrepareNetDirectory(NSString *dir) {
+    const char *path = dir.fileSystemRepresentation;
+    struct stat st;
+    if (lstat(path, &st) != 0) {
+        if (![NSFileManager.defaultManager createDirectoryAtPath:dir withIntermediateDirectories:YES
+                                                      attributes:@{NSFilePosixPermissions:@0755} error:nil] ||
+            lstat(path, &st) != 0) return NO;
+    }
+    if (!S_ISDIR(st.st_mode)) return NO;
+    if (getuid() == 0) (void)lchown(path, 501, 501);
+    if ((st.st_mode & 0755) != 0755) (void)fchmodat(AT_FDCWD, path, (st.st_mode & 07777) | 0755, AT_SYMLINK_NOFOLLOW);
+    return YES;
+}
+
+// 只留最近的 IKNetCacheLimit 首
+static void IKPruneNetDirectory(NSString *dir) {
+    NSArray *keys = @[NSURLIsRegularFileKey, NSURLContentModificationDateKey];
+    NSArray<NSURL *> *files = [NSFileManager.defaultManager contentsOfDirectoryAtURL:[NSURL fileURLWithPath:dir isDirectory:YES]
+        includingPropertiesForKeys:keys options:NSDirectoryEnumerationSkipsHiddenFiles error:nil];
+    NSMutableArray *entries = [NSMutableArray array];
+    for (NSURL *url in files) {
+        NSDictionary *values = [url resourceValuesForKeys:keys error:nil];
+        if ([values[NSURLIsRegularFileKey] boolValue] && [url.pathExtension isEqual:@"plist"])
+            [entries addObject:@[values[NSURLContentModificationDateKey] ?: NSDate.distantPast, url]];
+    }
+    if (entries.count <= IKNetCacheLimit) return;
+    [entries sortUsingComparator:^NSComparisonResult(NSArray *a, NSArray *b) { return [a[0] compare:b[0]]; }];
+    for (NSUInteger i = 0; i + IKNetCacheLimit < entries.count; i++)
+        [NSFileManager.defaultManager removeItemAtURL:entries[i][1] error:nil];
+}
+
+// 写成与手动导入同结构的时间轴文件，另带 source=net、provider、fetchedAt
+static BOOL IKWriteNetTimeline(NSString *bid, NSDictionary *track, IKNetLyricsResult *result) {
+    NSString *name = IKRecordingFilenames(bid, track).firstObject;
+    NSString *dir = IKNetDirectory();
+    if (!name || !result.lines.count || !IKPrepareNetDirectory(dir)) return NO;
+    NSMutableDictionary *d = [NSMutableDictionary dictionary];
+    for (NSString *k in @[@"externalID", @"persistentID", @"title", @"artist", @"duration", @"unstablePersistentID"]) {
+        if (track[k]) d[k] = track[k];
+    }
+    d[@"bundleID"] = bid;
+    d[@"lines"] = result.lines;
+    d[@"source"] = @"net";
+    d[@"provider"] = result.provider;
+    d[@"providerSongID"] = result.songID ?: @"";
+    d[@"durationDelta"] = @(result.durationDelta);
+    d[@"fetchedAt"] = @(NSDate.date.timeIntervalSince1970);
+    NSData *plist = [NSPropertyListSerialization dataWithPropertyList:d format:NSPropertyListBinaryFormat_v1_0 options:0 error:nil];
+    if (!plist || plist.length > IKMaxLyricBytes ||
+        ![plist writeToFile:[dir stringByAppendingPathComponent:name] options:NSDataWritingAtomic error:nil]) return NO;
+    IKPruneNetDirectory(dir);
+    return YES;
+}
+
 @interface IKMusicCenter ()
 @property(nonatomic, copy) NSString *title, *artist, *album, *mediaApplicationID, *playerPath;
 @property(nonatomic, copy) NSDictionary *recording, *nativeClock;
@@ -77,6 +177,19 @@ static NSString *IKAdjacentFile(NSString *playerPath, NSString *name) {
 @property(nonatomic, copy) NSDictionary *loadedTrack;
 @property(nonatomic, strong) NSTimer *boundary;
 @property(nonatomic) NSUInteger generation;
+// 当前时间轴来自哪一类文件：import / player / net / legacy；net 时 bridgePacket 是那份缓存
+@property(nonatomic, copy) NSString *bridgeSource;
+@property(nonatomic, copy) NSDictionary *bridgePacket;
+// 联网查询的状态。netToken 在换歌、换播放器、关开关时递增，用来丢弃过期回调
+@property(nonatomic, copy) NSString *netSession;
+@property(nonatomic, copy) NSArray *netQueryKey;
+@property(nonatomic) double netSessionSeen;
+@property(nonatomic) NSUInteger netToken;
+@property(nonatomic) BOOL netInFlight, netLoggedCache;
+@property(nonatomic, strong) NSTimer *netTimer;
+// 这首歌已经上报过的车载歌词，只在本地用来校验联网结果，不外发
+@property(nonatomic, strong) NSMutableOrderedSet<NSString *> *netEvidence;
+- (void)considerNetLyrics;
 @end
 
 static void IKLyricsBridgeChanged(CFNotificationCenterRef center, void *observer, CFStringRef name,
@@ -94,6 +207,19 @@ static void IKLyricsBridgeChanged(CFNotificationCenterRef center, void *observer
         else m.loadedKey = nil;
         [m refreshLyricsBridge];
         [[NSNotificationCenter defaultCenter] postNotificationName:IKMusicDidChangeNotification object:m];
+    });
+}
+
+// 设置里开关“联网匹配逐句歌词”。IKController 收到同一个通知后在主队列上 reload IKPrefs，
+// 这里在主队列上再排一轮，保证读到的是新值
+static void IKNetPrefsChanged(CFNotificationCenterRef center, void *observer, CFStringRef name,
+                              const void *object, CFDictionaryRef info) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        dispatch_async(dispatch_get_main_queue(), ^{
+            IKMusicCenter *m = [IKMusicCenter shared];
+            if ([m refreshLyricsBridge])
+                [[NSNotificationCenter defaultCenter] postNotificationName:IKMusicDidChangeNotification object:m];
+        });
     });
 }
 
@@ -122,6 +248,9 @@ static void IKLyricsBridgeChanged(CFNotificationCenterRef center, void *observer
     for (NSString *name in @[@IKRecordingChangedDarwin, @IKRequestRecordingDarwin, @IKPlaybackDiagnosticsNotification])
         CFNotificationCenterAddObserver(center, NULL, IKLyricsBridgeChanged, (__bridge CFStringRef)name, NULL,
                                         CFNotificationSuspensionBehaviorDeliverImmediately);
+    // 用自己做 observer，和 IKController 对同一通知的登记区分开
+    CFNotificationCenterAddObserver(center, (__bridge const void *)self, IKNetPrefsChanged, CFSTR(IKPrefsChangedDarwin), NULL,
+                                    CFNotificationSuspensionBehaviorDeliverImmediately);
     [self refresh];
 }
 
@@ -239,10 +368,15 @@ static NSDictionary *IKSnapshot(NSString *path) {
     NSString *bid = self.mediaApplicationID;
     NSDictionary *track = self.recording;
     NSArray<NSURL *> *imports = IKImportURLs(bid,track);
+    // 优先级：手动导入 > 播放器时间轴 > 联网缓存 > 旧路径。开关关掉时不读联网缓存
+    NSArray<NSURL *> *nets = IKSupportedPlayer(bid) && IKNetLyricsEnabled() ? IKNetURLs(bid,track) : @[];
     NSString *legacy = [IKDataDir stringByAppendingPathComponent:@"lyrics.plist"];
     NSMutableArray *files = [NSMutableArray array];
     for (NSURL *url in imports) [files addObject:url.path];
-    [files addObjectsFromArray:@[self.playerPath ?: @"", legacy]];
+    [files addObject:self.playerPath ?: @""];
+    for (NSURL *url in nets) [files addObject:url.path];
+    [files addObject:legacy];
+    NSUInteger playerIndex = imports.count, netEnd = playerIndex + 1 + nets.count;
     NSMutableArray *key = [NSMutableArray arrayWithObject:bid ?: @""];
     for (NSString *p in files) [key addObject:IKFileStamp(p)];
     BOOL changed = ![key isEqual:self.loadedKey] || (self.loadedTrack != track && ![self.loadedTrack isEqual:track]);
@@ -252,11 +386,18 @@ static NSDictionary *IKSnapshot(NSString *path) {
         self.loadedTrack = track;
         self.bridgeLines = nil;
         self.bridgeTitle = nil;
+        self.bridgeSource = nil;
+        self.bridgePacket = nil;
         self.singleCue = NO;
+        // 播放器只给了当前一句（没有整首时间轴）时先记下，联网缓存有整首就用联网的
+        NSDictionary *cue = nil, *chosen = nil;
         for (NSUInteger i=0; bid.length && track && ![track[@"live"] isEqual:@YES] && i<files.count; i++) {
+            if (cue && i >= netEnd) break;
             if (key[i+1] == NSNull.null) continue;
             NSDictionary *d = IKSnapshot(files[i]);
             if (!d || [d[@"active"] isEqual:@NO]) continue;
+            BOOL fromNet = i > playerIndex && i < netEnd;
+            if (fromNet && ![d[@"source"] isEqual:@"net"]) continue;
             NSString *declared = IKLyricString(d[@"bundleID"], 256);
             if (declared && ![bid.lowercaseString isEqual:declared.lowercaseString]) continue;
             BOOL ms = [@[@"ms", @"millisecond", @"milliseconds", @YES] containsObject:d[@"timeUnit"] ?: @""];
@@ -267,7 +408,8 @@ static NSDictionary *IKSnapshot(NSString *path) {
             if (!IKSameRecording(track, identity)) continue;
             NSArray *rows = IKNormalizeLyricLines(d[@"lines"] ?: d[@"timeline"] ?: d[@"lyricsLines"], ms, self.duration);
             if (!rows.count) rows = IKParseTimedLyrics(d[@"lrc"] ?: d[@"lyrics"], self.duration);
-            if (!rows.count && [d[@"current"] ?: d[@"lyric"] isKindOfClass:NSString.class]) {
+            BOOL single = NO;
+            if (!rows.count && !fromNet && [d[@"current"] ?: d[@"lyric"] isKindOfClass:NSString.class]) {
                 id start = d[@"currentStartMs"] ?: d[@"currentStart"] ?: d[@"positionMs"] ?: d[@"position"];
                 BOOL startMS = d[@"currentStartMs"] || (!d[@"currentStart"] && d[@"positionMs"]) || ms;
                 if (start && [start respondsToSelector:@selector(doubleValue)]) {
@@ -275,29 +417,134 @@ static NSDictionary *IKSnapshot(NSString *path) {
                     double end = d[@"currentEndMs"] ? IKNumber(d[@"currentEndMs"])/1000 : IKNumber(d[@"currentEnd"])/(ms?1000:1);
                     double length = d[@"lineDurationMs"] ? IKNumber(d[@"lineDurationMs"])/1000 : IKNumber(d[@"lineDuration"])/(ms?1000:1);
                     if (end <= begin) end = begin + (length > 0 ? length : 4);
-                    self.singleCue = YES;
+                    single = YES;
                     rows = IKNormalizeLyricLines(@[@{@"start":@(begin), @"end":@(end), @"text":d[@"current"] ?: d[@"lyric"]}], NO, self.duration);
                 }
             }
-            if (rows.count) {
-                self.bridgeLines = rows;
-                self.bridgeTitle = [track[@"correctedTitle"] isEqual:@YES] ? track[@"title"] : IKLyricString(identity[@"title"],512);
-                NSString *source = i < imports.count ? @"import" : @"legacy";
-                NSString *field = @"";
-                if (i == imports.count) {
-                    source = IKMetadataSymbol(d[@"source"]) ? d[@"source"] : @"player";
-                    if (IKMetadataSymbol(d[@"sourceKey"])) field = [@" key=" stringByAppendingString:d[@"sourceKey"]];
-                }
-                [IKPrefs log:[NSString stringWithFormat:@"lyrics timeline app=%@ source=%@%@ lines=%lu",
-                              bid, source, field, (unsigned long)rows.count]];
-                break;
+            if (!rows.count) continue;
+            NSString *kind = i < playerIndex ? @"import" : i == playerIndex ? @"player" : fromNet ? @"net" : @"legacy";
+            NSString *source = kind, *field = @"";
+            if (i == playerIndex) {
+                source = IKMetadataSymbol(d[@"source"]) ? d[@"source"] : @"player";
+                if (IKMetadataSymbol(d[@"sourceKey"])) field = [@" key=" stringByAppendingString:d[@"sourceKey"]];
             }
+            NSString *title = [track[@"correctedTitle"] isEqual:@YES] ? track[@"title"] : IKLyricString(identity[@"title"],512);
+            NSDictionary *pick = @{@"rows":rows, @"single":@(single), @"kind":kind, @"source":source, @"field":field,
+                                   @"title":title ?: NSNull.null, @"packet":d};
+            if (single && i == playerIndex && nets.count) { cue = pick; continue; }
+            chosen = pick;
+            break;
+        }
+        if (!chosen) chosen = cue;
+        if (chosen) {
+            NSArray *rows = chosen[@"rows"];
+            self.bridgeLines = rows;
+            self.bridgeTitle = chosen[@"title"] == NSNull.null ? nil : chosen[@"title"];
+            self.singleCue = [chosen[@"single"] boolValue];
+            self.bridgeSource = chosen[@"kind"];
+            if ([chosen[@"kind"] isEqual:@"net"]) self.bridgePacket = chosen[@"packet"];
+            [IKPrefs log:[NSString stringWithFormat:@"lyrics timeline app=%@ source=%@%@ lines=%lu",
+                          bid, chosen[@"source"], chosen[@"field"], (unsigned long)rows.count]];
         }
     }
     self.lyricsBridgeActive = self.bridgeLines.count > 0;
     [self advanceLyricsBridge];
     [self scheduleBoundary];
+    [self considerNetLyrics];
     return changed;
+}
+
+#pragma mark 联网时间轴
+
+// 曲目确定、基线歌名稳定、开关打开、本地没有手动导入或播放器时间轴时，后台查一次
+- (void)considerNetLyrics {
+    NSString *session = self.tracker.recording[@"playSession"];
+    double now = NSProcessInfo.processInfo.systemUptime;
+    if (!(session ? [session isEqual:self.netSession] : !self.netSession)) {
+        // 换歌：作废上一首的计时和还没回来的查询
+        self.netToken++;
+        [self.netTimer invalidate];
+        self.netTimer = nil;
+        self.netSession = session;
+        self.netSessionSeen = now;
+        self.netQueryKey = nil;
+        self.netInFlight = NO;
+        self.netLoggedCache = NO;
+        self.netEvidence = [NSMutableOrderedSet orderedSet];
+    }
+    NSString *line = session ? self.reportedLyric : nil;
+    if (line.length && line.length <= 512 && self.netEvidence.count < 16) [self.netEvidence addObject:line];
+    NSString *bid = self.mediaApplicationID;
+    NSDictionary *track = self.recording;
+    if (!session || !IKSupportedPlayer(bid) || !track || [track[@"live"] isEqual:@YES] || !IKNetLyricsEnabled()) return;
+    NSString *title = IKLyricString(track[@"title"],512);
+    double duration = [track[@"duration"] doubleValue];
+    if (!title || !(duration > 0) || !IKRecordingFilenames(bid,track).count) return;
+    if ([self.bridgeSource isEqual:@"import"] || ([self.bridgeSource isEqual:@"player"] && !self.singleCue)) return;
+    if ([self.bridgeSource isEqual:@"net"]) {
+        // 缓存命中：不再联网
+        if (!self.netLoggedCache) {
+            self.netLoggedCache = YES;
+            NSString *provider = self.bridgePacket[@"provider"];
+            if (IKNetProviderName(provider))
+                [IKPrefs log:IKNetLogLine(bid, provider, @"cached", self.bridgeLines.count, self.bridgePacket[@"durationDelta"])];
+        }
+        return;
+    }
+    double wait = self.netSessionSeen + IKNetSettleSeconds - now;
+    if (wait > 0) {
+        if (!self.netTimer) {
+            __weak IKMusicCenter *weakSelf = self;
+            self.netTimer = [NSTimer timerWithTimeInterval:wait repeats:NO block:^(NSTimer *timer) {
+                weakSelf.netTimer = nil;
+                [weakSelf considerNetLyrics];
+            }];
+            [NSRunLoop.mainRunLoop addTimer:self.netTimer forMode:NSRunLoopCommonModes];
+        }
+        return;
+    }
+    if (self.netInFlight) return;
+    NSString *artist = IKLyricString(track[@"artist"],512);
+    // 歌手字段被车载歌词占用时，基线里的“歌手”可能是一句歌词：只按歌名搜，靠歌名和时长匹配
+    BOOL reliable = artist && self.tracker.lyricField != 2;
+    NSArray *identity = @[bid.lowercaseString, title, artist ?: @"", @(llround(duration))];
+    NSArray *queryKey = [identity arrayByAddingObject:@(reliable)];
+    if ([queryKey isEqual:self.netQueryKey]) return;
+    self.netQueryKey = queryKey;
+    NSUInteger token = self.netToken;
+    __weak IKMusicCenter *weakSelf = self;
+    // 歌手不可靠时只能按歌名和时长匹配，再用已上报的车载歌词在本地核对，排除同名同长的翻唱
+    NSArray *evidence = reliable ? nil : self.netEvidence.array;
+    self.netInFlight = [[IKNetLyricsClient shared] lookupBundle:bid title:title artist:artist artistReliable:reliable
+        duration:duration evidence:evidence completion:^(IKNetLyricsResult *result) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [weakSelf finishNetLookup:result token:token identity:identity];
+            });
+        }];
+}
+
+- (void)finishNetLookup:(IKNetLyricsResult *)result token:(NSUInteger)token identity:(NSArray *)identity {
+    // 换歌、换播放器后回来的结果直接丢掉
+    if (token != self.netToken) return;
+    self.netInFlight = NO;
+    NSString *bid = self.mediaApplicationID;
+    NSDictionary *track = self.recording;
+    NSArray *current = @[bid.lowercaseString ?: @"", IKLyricString(track[@"title"],512) ?: @"",
+                         IKLyricString(track[@"artist"],512) ?: @"", @(llround([track[@"duration"] doubleValue]))];
+    // 查询期间歌名被纠正或开关被关掉：丢弃，按当前状态重新判断
+    if (![current isEqual:identity] || !IKNetLyricsEnabled() || !IKSupportedPlayer(bid)) {
+        [self considerNetLyrics];
+        return;
+    }
+    for (NSDictionary *a in result.attempts) {
+        if (IKNetProviderName(a[@"provider"]))
+            [IKPrefs log:IKNetLogLine(bid, a[@"provider"], a[@"status"], [a[@"lines"] unsignedIntegerValue], a[@"dt"])];
+    }
+    if (![result.status isEqual:@"hit"]) return;   // 继续显示车载单句
+    if (!IKWriteNetTimeline(bid, track, result)) return;
+    self.netLoggedCache = YES;
+    if ([self refreshLyricsBridge])
+        [NSNotificationCenter.defaultCenter postNotificationName:IKMusicDidChangeNotification object:self];
 }
 
 - (void)advanceLyricsBridge {
@@ -390,6 +637,15 @@ static NSDictionary *IKSnapshot(NSString *path) {
     self.artworkData = nil;
     self.album = nil;
     self.lastDiagnostic = nil;
+    // 换播放器：丢弃还没回来的联网查询
+    self.netToken++;
+    [self.netTimer invalidate];
+    self.netTimer = nil;
+    self.netSession = nil;
+    self.netQueryKey = nil;
+    self.netInFlight = NO;
+    self.bridgeSource = nil;
+    self.bridgePacket = nil;
 }
 
 - (void)applicationChanged {
@@ -452,6 +708,14 @@ static NSDictionary *IKImportTarget(NSString *bid, NSDictionary *info) {
     if (hasLines) target[@"mode"] = @"播放器时间轴";
     else if (sameLive && IKLyricString(live[@"carLyric"],512)) target[@"mode"] = @"播放器单句（无时间标签）";
     else target[@"mode"] = sameLive ? @"播放器已连接，当前曲目未提供时间轴" : @"系统播放信息";
+    // 与悬浮窗同样的优先级：播放器时间轴 > 联网缓存；手动导入在下面覆盖
+    if (!hasLines && IKNetLyricsEnabledOnDisk()) {
+        for (NSURL *url in IKNetURLs(bid,target)) {
+            NSDictionary *net = IKSnapshot(url.path);
+            if ([net[@"source"] isEqual:@"net"] && [net[@"lines"] isKindOfClass:NSArray.class] && [net[@"lines"] count] &&
+                IKSameRecording(target,net)) { target[@"mode"] = IKNetTimelineMode; break; }
+        }
+    }
     for (NSURL *url in IKImportURLs(bid,target)) {
         if (IKSameRecording(target,IKSnapshot(url.path))) { target[@"mode"] = @"已绑定本地时间轴"; break; }
     }
@@ -519,7 +783,7 @@ static NSString *IKSelectedShapePath(NSString *bundle) {
     // Older HUDs already recorded these events. Export only known fields, never free-form log lines.
     NSURL *url = [NSURL fileURLWithPath:[IKDataDir stringByAppendingPathComponent:@"island.log"]];
     NSString *log = [[NSString alloc] initWithData:IKReadLyricFile(url) ?: [NSData data] encoding:NSUTF8StringEncoding];
-    NSString *pattern = @"(?m)^\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2} (?:recording app=(?:com\\.tencent\\.QQMusic|com\\.netease\\.cloudmusic) externalID=[01] persistentID=[01] queueIndex=[01]|lyric field=[0-3]|interaction tap state=[0-3] notif=[01]|interaction longPress state=(?:compact|lyric))$";
+    NSString *pattern = @"(?m)^\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2} (?:recording app=(?:com\\.tencent\\.QQMusic|com\\.netease\\.cloudmusic) externalID=[01] persistentID=[01] queueIndex=[01]|lyric field=[0-3]|interaction tap state=[0-5] notif=[01]|interaction longPress state=(?:compact|lyric|hang)|net lyrics app=(?i:com\\.tencent\\.qqmusic|com\\.netease\\.cloudmusic) provider=(?:qq|netease) result=(?:hit|miss|error|cached) lines=\\d{1,4} dt=(?:-|\\d{1,3}\\.\\d))$";
     NSRegularExpression *events = [NSRegularExpression regularExpressionWithPattern:pattern options:0 error:nil];
     NSArray *matches = log ? [events matchesInString:log options:0 range:NSMakeRange(0,log.length)] : nil;
     [parts addObject:matches.count ? @"悬浮窗最近的播放与切换记录" : @"悬浮窗尚无可导出的播放或切换记录。"];

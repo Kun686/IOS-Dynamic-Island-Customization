@@ -130,7 +130,11 @@ static UIColor *IKColorFromHex(NSString *hex, UIColor *fallback) {
     self.lyricAlignment = value >= 1 && value <= 3 ? value : 0;
     self.lyricOffsetX   = clamp(n(@"lyricOffsetX", 0), -120, 120);
     self.lyricOffsetY   = clamp(n(@"lyricOffsetY", 0), -12, 12);
-    self.defaultCompact = [d[@"defaultMusicView"] isEqual:@1];
+    NSInteger style = [d[@"defaultMusicView"] isKindOfClass:NSNumber.class] ? [d[@"defaultMusicView"] integerValue] : 0;
+    self.musicStyle     = style >= 0 && style <= 2 ? style : 0;
+    self.defaultCompact = (self.musicStyle == 1);
+    self.recordIndicator = b(@"recordIndicator", YES);
+    self.netLyrics      = b(@"netLyrics", YES);
     self.spinSeconds    = MAX(1.0, n(@"spinSeconds", 8));
     self.notifDuration  = MAX(1.0, n(@"notifDuration", 5));
     // 岛的位置和大小：plist 里写了就用写的，否则按机型识别

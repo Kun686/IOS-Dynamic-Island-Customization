@@ -57,7 +57,8 @@ static void LaunchServicesApplicationStateChanged
 
     for (LSApplicationProxy *app in [[objc_getClass("LSApplicationWorkspace") defaultWorkspace] allApplications])
     {
-        if ([app.applicationIdentifier isEqualToString:@"ch.xxtou.hudapp"])
+        // 用自己的包标识判断（0.6.7 起是 com.YiChen.LDDMH）：写死旧标识的话，装卸任何 App 都会让悬浮进程以为自己被卸载了
+        if ([app.applicationIdentifier isEqualToString:(NSBundle.mainBundle.bundleIdentifier ?: @"com.YiChen.LDDMH")])
         {
             isAppInstalled = YES;
             break;

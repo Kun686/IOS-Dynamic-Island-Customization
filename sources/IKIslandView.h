@@ -5,6 +5,8 @@ typedef NS_ENUM(NSInteger, IKState) {
     IKStateMusicCompact,
     IKStateLyric,
     IKStateNotif,
+    IKStateLyricHang,   // 悬挂歌词：矮一点的胶囊，左边方形封面、右边音柱，开孔正下方一行居中的小字歌词
+    IKStateRecord,      // 录屏中、没有音乐和通知时：左边闪烁的红点，右边录制时长
 };
 
 // 圆角矩形（宽 w、高 h、圆角 r）的边上，从顶部中点顺时针走过全长 p 倍的那个点相对中心的角度，
@@ -15,6 +17,8 @@ FOUNDATION_EXTERN CGFloat IKRingAngle(CGFloat w, CGFloat h, CGFloat r, CGFloat p
 @interface IKCoverView : UIView
 @property (nonatomic, strong) UIImage *image;
 @property (nonatomic, strong) UIColor *accent;
+// YES：显示成圆角方形的专辑图（悬挂歌词用），去掉中间的孔、转回正位且不转
+@property (nonatomic) BOOL squared;
 - (void)setSpinning:(BOOL)spinning period:(double)seconds;
 @end
 
@@ -54,6 +58,11 @@ FOUNDATION_EXTERN CGFloat IKRingAngle(CGFloat w, CGFloat h, CGFloat r, CGFloat p
 // round：YES 时按头像显示成圆形，NO 时按应用图标显示成圆角方形
 - (void)setNotifIcon:(UIImage *)icon appName:(NSString *)app round:(BOOL)round;
 - (void)setBarsAnimating:(BOOL)on;
+
+// 录屏：recording 为 YES 时，音乐状态的胶囊里在音柱左边多一个闪烁的小红点；
+// IKStateRecord 状态显示红点和 recordElapsed（秒）格式化成的时长
+@property (nonatomic) BOOL recording;
+@property (nonatomic) NSTimeInterval recordElapsed;
 
 // 播放进度环：沿胶囊边缘从顶部中点顺时针走，走满一圈表示这首歌播完。
 // 胶囊形变时环跟着胶囊一起变（同一个动画），开关时淡入淡出

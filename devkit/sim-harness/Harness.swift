@@ -21,7 +21,7 @@ final class HarnessAppDelegate: UIResponder, UIApplicationDelegate {
             var o: [String: Any] = [:]
             for key in ["placement", "transitionStyle", "lyricLines", "lyricEffect", "titleColorMode", "lyricColorMode",
                         "coverExtraWidth", "coverExtraHeight", "coverOffsetY", "coverCompactSide", "calibrateUntil",
-                        "lyricAlignment", "lyricOffsetX", "lyricOffsetY"] {
+                        "lyricAlignment", "lyricOffsetX", "lyricOffsetY", "musicStyle"] {
                 if let v = env["IK_" + key], let d = Double(v) { o[key] = d }
             }
             if let c = env["IK_titleColor"] { o["titleColor"] = UIColor(Color(hex: c)) }
@@ -37,6 +37,7 @@ final class HarnessAppDelegate: UIResponder, UIApplicationDelegate {
             if let v = env["IK_lyricColorMode"], let i = Int(v) { store.s.lyricColorMode = i }
             if let v = env["IK_lyricColor"] { store.s.lyricColor = v }
             if let v = env["IK_transitionStyle"], let i = Int(v) { store.s.transitionStyle = i }
+            if let v = env["IK_defaultMusicView"], let i = Int(v) { store.s.defaultMusicView = i }
             let root: AnyView
             switch scenario {
             case "lyric": root = AnyView(NavigationStack { LyricView() })
@@ -50,6 +51,7 @@ final class HarnessAppDelegate: UIResponder, UIApplicationDelegate {
                     root = AnyView(NavigationStack { LyricView().defaultScrollAnchor(.bottom) })
                 } else { root = AnyView(NavigationStack { LyricView() }) }
             case "about": root = AnyView(NavigationStack { AboutView() })
+            case "notify": root = AnyView(NavigationStack { NotifyView() })
             default: root = AnyView(NavigationStack { HomeView() })
             }
             w.rootViewController = UIHostingController(rootView: root.environmentObject(store)
@@ -152,6 +154,51 @@ final class HarnessAppDelegate: UIResponder, UIApplicationDelegate {
                 sampler.invalidate()
                 self.log(String(format: "morph frames=%d coverFail=%d ringFail=%d ringFrames=%d minRingOpacity=%.2f firstCover=%@ firstRing=%@",
                                 frames, coverFail, ringFail, ringFrames, minRing, firstCover ?? "-", firstRing ?? "-"))
+            }
+            return
+        }
+        if env["IK_TL"] == "hang" || env["IK_TL"] == "record" {
+            // 悬挂歌词（IK_musicStyle=2）、通知弹出、录屏提示。逐帧检查胶囊始终盖住模拟的系统岛紧凑态
+            let ctl = IKController.shared()!
+            let p = IKPrefs.shared()!
+            let sw = UIScreen.main.bounds.width
+            let sys = CGRect(x: (sw - 250.67) / 2, y: p.islandTop, width: 250.67, height: p.cutoutHeight)
+            var sampling = false, frames = 0, coverFail = 0
+            var firstCover: String?
+            let sampler = Timer.scheduledTimer(withTimeInterval: 1.0 / 120, repeats: true) { _ in
+                guard sampling else { return }
+                frames += 1
+                if let problem = HarnessHUD.coverageProblem(forSystemRect: sys) { coverFail += 1; firstCover = firstCover ?? problem }
+            }
+            at(0.2, "system compact 250.67") { HarnessHUD.setSystemFrames([NSValue(cgRect: sys)]) }
+            if env["IK_TL"] == "hang" {
+                at(0.3, "track starts") { m.h_setTitle("晴天", artist: "周杰伦", album: "叶惠美", duration: 269, playing: true) }
+                at(1.0, "lyric") { m.h_setTitle("晴天", artist: "故事的小黄花 从出生那年就飘着", album: "叶惠美", duration: 269, playing: true) }
+                at(2.0, "start sampling") { sampling = true }
+                at(2.2, "notification while hang") {
+                    ctl.showNotification(withBundle: "com.tencent.xin", appName: "微信", title: "小明", message: "今晚一起吃饭吗？", avatar: nil)
+                }
+                at(4.0, "dismiss -> hang") { ctl.perform(NSSelectorFromString("dismissNotification")) }
+                at(5.2, "tap -> compact") { ctl.perform(NSSelectorFromString("tapped")) }
+                at(6.4, "tap -> hang") { ctl.perform(NSSelectorFromString("tapped")) }
+                at(7.6, "recording starts while hang") { HarnessHUD.setScreenCaptured(true) }
+                at(10.8, "probe hang with record dot") {}
+                at(11.0, "recording stops") { HarnessHUD.setScreenCaptured(false) }
+            } else {
+                // 第一次从开孔里长出来那一段不算（模拟的系统岛画成了紧凑态，长出来途中本来就盖不住）
+                at(0.6, "recording starts, no music") { HarnessHUD.setScreenCaptured(true) }
+                at(1.4, "probe banner") { sampling = true }
+                at(4.0, "probe record state") {}
+                at(6.5, "probe timer") {}
+                at(7.0, "music starts while recording") { m.h_setTitle("晴天", artist: "周杰伦", album: "叶惠美", duration: 269, playing: true) }
+                at(8.5, "probe lyric with dot") {}
+                at(9.0, "recording stops") { HarnessHUD.setScreenCaptured(false) }
+                at(10.0, "probe end banner") {}
+            }
+            at(14.5, "report") {
+                sampling = false
+                sampler.invalidate()
+                self.log(String(format: "%@ frames=%d coverFail=%d firstCover=%@", self.env["IK_TL"]!, frames, coverFail, firstCover ?? "-"))
             }
             return
         }

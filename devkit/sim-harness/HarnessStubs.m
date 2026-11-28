@@ -61,8 +61,14 @@ void SetHUDEnabled(BOOL isEnabled) {}
 // 模拟器里设置页和“悬浮进程”是同一个用户，数据目录本来就可写
 BOOL IKRepairDataDirectory(void) { return YES; }
 BOOL IKEnsureDataDirectoryWritable(void) { return YES; }
+// 模拟器 App 的临时目录归当前用户，不需要提权修
+BOOL IKEnsureTemporaryDirectoryWritable(void) { return YES; }
+NSString *IKAppStorageDiagnostic(void) { return @"存储诊断：模拟器测试桩（不检查临时目录和数据目录）"; }
 
 static NSDictionary *gOverrides;
+// 模拟“正在录屏”：替换 -[UIScreen isCaptured]，由 setScreenCaptured: 切换
+static BOOL gFakeCaptured;
+static BOOL HarnessIsCaptured(id self, SEL _cmd) { return gFakeCaptured; }
 static UIView *gSystemLayer;   // 放模拟系统岛的那一层，在岛的容器下面
 static IMP gOrigReload;
 static void HarnessReload(IKPrefs *self, SEL _cmd) {
@@ -74,6 +80,7 @@ static void HarnessReload(IKPrefs *self, SEL _cmd) {
 
 + (void)installInWindow:(UIWindow *)window overrides:(NSDictionary *)prefs systemCompact:(BOOL)compact {
     gOverrides = prefs;
+    method_setImplementation(class_getInstanceMethod([UIScreen class], @selector(isCaptured)), (IMP)HarnessIsCaptured);
     Method m = class_getInstanceMethod([IKPrefs class], @selector(reload));
     gOrigReload = method_setImplementation(m, (IMP)HarnessReload);
     [[IKPrefs shared] reload];
@@ -149,6 +156,11 @@ static void HarnessReload(IKPrefs *self, SEL _cmd) {
             [sys addSubview:art]; [sys addSubview:wave];
         }
     }
+}
+
++ (void)setScreenCaptured:(BOOL)captured {
+    gFakeCaptured = captured;
+    [[NSNotificationCenter defaultCenter] postNotificationName:UIScreenCapturedDidChangeNotification object:[UIScreen mainScreen]];
 }
 
 + (void)setSystemFrames:(NSArray<NSValue *> *)frames {

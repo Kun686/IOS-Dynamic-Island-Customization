@@ -34,6 +34,10 @@ python3 drive.py $UDID /tmp/ik interrupt '{"IK_SCENARIO":"hud","IK_placement":1,
 # 音乐 ↔ 通知直接变形、紧凑 ↔ 歌词时进度环跟着胶囊（最后一张截图要晚于 11 秒，日志里才有 morph 那一行）：
 # coverFail 是胶囊没盖住模拟系统岛的帧数（下挂模式本来就不盖，不看这个数），ringFail 是环和胶囊尺寸、圆角对不上的帧数
 python3 drive.py $UDID /tmp/ik morph '{"IK_SCENARIO":"hud","IK_placement":1,"IK_TL":"morph"}' 2.3 2.42 4.15 5.3 6.5 8.55 11.3
+# 悬挂歌词 + 通知收一下再弹出 + 录屏红点（日志最后一行 hang frames=… coverFail=…，覆盖模式应为 0）
+python3 drive.py $UDID /tmp/ik hang '{"IK_SCENARIO":"hud","IK_placement":1,"IK_TL":"hang","IK_musicStyle":2}' 1.6 2.4 2.55 3.0 5.5 9.0 14.8
+# 录屏：开始横幅 → 红点和时长 → 放歌时音柱旁的小红点 → 结束横幅（用 setScreenCaptured: 模拟 UIScreen.captured）
+python3 drive.py $UDID /tmp/ik record '{"IK_SCENARIO":"hud","IK_placement":1,"IK_TL":"record"}' 1.4 6.5 8.5 10.0 14.8
 # 文字位置：日志里 firstRowCenterOffset 是第一行文字中心相对胶囊中线的偏移（居中应为 0，自定义应约等于 lyricOffsetX）
 python3 drive.py $UDID /tmp/ik align '{"IK_SCENARIO":"hud","IK_placement":1,"IK_TL":"align","IK_lyricAlignment":1}' 2.2
 # 设置页
@@ -46,7 +50,7 @@ xcrun swiftc -O contact.swift -o /tmp/ik/contact && /tmp/ik/contact /tmp/ik/shee
 
 `IK_` 开头的环境变量会覆盖对应的配置项（`placement`、`transitionStyle`、`lyricLines`、`lyricEffect`、
 `titleColorMode`、`lyricColorMode`、`coverExtraWidth`、`coverExtraHeight`、`coverOffsetY`、`coverCompactSide`、`calibrateUntil`、`titleColor`、
-`lyricAlignment`、`lyricOffsetX`、`lyricOffsetY`）。
+`lyricAlignment`、`lyricOffsetX`、`lyricOffsetY`、`musicStyle`）。
 
 不想把模拟器建在用户目录里时，用 `xcrun simctl --set <目录> create …` 在工程的 `.build/` 下建设备，并设置 `IK_SIM_SET=<目录>`，`drive.py` 会带上 `--set`。
 `drive.py` 的日志是追加写入的，重跑前换一个输出目录。

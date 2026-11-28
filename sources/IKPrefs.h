@@ -27,7 +27,11 @@
 @property (nonatomic) NSInteger lyricAlignment;  // 0 左、1 中（按整个胶囊的中线）、2 右、3 自定义
 @property (nonatomic) CGFloat lyricOffsetX;      // 自定义：文字中心相对胶囊中线的左右偏移，正数向右
 @property (nonatomic) CGFloat lyricOffsetY;      // 自定义：上下偏移，正数向下
-@property (nonatomic) BOOL defaultCompact;
+// 默认播放样式（plist 键 defaultMusicView）：0 歌词态；1 紧凑态；2 悬挂歌词（贴在岛下沿的一行小字）
+@property (nonatomic) NSInteger musicStyle;
+@property (nonatomic) BOOL defaultCompact;       // musicStyle == 1
+@property (nonatomic) BOOL recordIndicator;      // 录屏时在岛上提示（默认开）
+@property (nonatomic) BOOL netLyrics;            // 联网匹配逐句歌词时间轴（默认开）
 @property (nonatomic) double spinSeconds;        // 转一圈用时
 @property (nonatomic) double notifDuration;      // 通知停留秒数
 @property (nonatomic, copy) NSSet<NSString *> *notifApps;

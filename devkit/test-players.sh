@@ -18,7 +18,7 @@ test_player qq com.tencent.QQMusic qrc
 test_player netease com.netease.cloudmusic yrc
 
 xcrun --sdk macosx clang -fobjc-arc -fmodules -fmodules-cache-path="$out/modules" -Isources -Idevkit/host-stubs \
-    -Wno-incomplete-implementation devkit/test-music-center.m sources/IKLyricsTimeline.m sources/IKPlaybackDiagnostic.m sources/IKLocalAvatar.m \
+    -Wno-incomplete-implementation devkit/test-music-center.m sources/IKLyricsTimeline.m sources/IKPlaybackDiagnostic.m sources/IKLocalAvatar.m sources/IKNetLyrics.m \
     -framework Foundation -framework CoreGraphics -framework ImageIO -o "$out/test-music-center"
 "$out/test-music-center" "$PWD/$out"
 

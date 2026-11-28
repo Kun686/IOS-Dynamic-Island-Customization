@@ -676,7 +676,15 @@ static UIImage *IKFindImageEnhanced(id obj, NSInteger depth) {
         if (!avatar && [bundleID isEqual:@"com.tencent.xin"]) {
             NSURL *file = [IKLocalAvatar.shared imageForTitle:title.length ? title : subtitle];
             if (file) avatar = [UIImage imageWithContentsOfFile:file.path];
-            if (avatar) avatarFrom = @"localChoice";
+            if (avatar) {
+                avatarFrom = @"localChoice";
+                // 和设置页保存时那一行自证信息对照：两边亮度一致说明文件没问题，岛上发黑就是显示那一步的事
+                NSData *bytes = [NSData dataWithContentsOfURL:file];
+                IKNotifLog(@"备用头像 %@ size=%.0fx%.0f", [IKLocalAvatar describeImageData:bytes] ?: @"无法解码",
+                           avatar.size.width * avatar.scale, avatar.size.height * avatar.scale);
+            } else if (file) {
+                IKNotifLog(@"备用头像 文件存在但读不出图片");
+            }
         }
         if (!avatar) {
             UIImage *appIcon = IKApplicationIconFromBundle(sectionBundle, bundleID);

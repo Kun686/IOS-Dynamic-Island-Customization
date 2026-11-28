@@ -94,7 +94,9 @@ rm -f TrollSpeed.tipa
 zip -qr TrollSpeed.tipa Payload
 cd - || exit
 mkdir -p packages
-PACKAGE_NAME="TrollSpeed+AppIntents16_$VERSION"
+# 安装包按“灵动岛美化_版本号”命名，版本号取 App 自己的 CFBundleShortVersionString
+APP_VERSION=$(plutil -extract CFBundleShortVersionString raw -o - Resources/Info.plist) || exit 1
+PACKAGE_NAME="灵动岛美化_$APP_VERSION"
 if [ -n "${IK_SUFFIX:-}" ]; then
     case "$IK_SUFFIX" in
         *[!A-Za-z0-9._-]*) echo "Error: IK_SUFFIX contains unsupported characters" >&2; exit 1 ;;
