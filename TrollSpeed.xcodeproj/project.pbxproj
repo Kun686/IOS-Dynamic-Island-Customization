@@ -106,10 +106,18 @@
 		CC9130C02B62A33A006E3280 /* IKController.m in Sources */ = {isa = PBXBuildFile; fileRef = CC9130B32B62A33A006E3280 /* IKController.m */; };
 		CC9130C12B62A33A006E3280 /* IKIslandView.m in Sources */ = {isa = PBXBuildFile; fileRef = CC9130B42B62A33A006E3280 /* IKIslandView.m */; };
 		CC9130C32B62A33A006E3280 /* IKMusicCenter.m in Sources */ = {isa = PBXBuildFile; fileRef = CC9130B62B62A33A006E3280 /* IKMusicCenter.m */; };
+		1B8600C32B62A33A006E3280 /* IKLyricsTimeline.m in Sources */ = {isa = PBXBuildFile; fileRef = 1B8600B62B62A33A006E3280 /* IKLyricsTimeline.m */; };
+		4E7100C32B62A33A006E3280 /* IKNetLyrics.m in Sources */ = {isa = PBXBuildFile; fileRef = 4E7100B62B62A33A006E3280 /* IKNetLyrics.m */; };
+		2D9600C32B62A33A006E3280 /* IKPlaybackDiagnostic.m in Sources */ = {isa = PBXBuildFile; fileRef = 2D9600B62B62A33A006E3280 /* IKPlaybackDiagnostic.m */; };
+		D11900C32B62A33A006E3280 /* IKLocalAvatar.m in Sources */ = {isa = PBXBuildFile; fileRef = D11900B62B62A33A006E3280 /* IKLocalAvatar.m */; };
 		CC9130C42B62A33A006E3280 /* IKPrefs.m in Sources */ = {isa = PBXBuildFile; fileRef = CC9130B72B62A33A006E3280 /* IKPrefs.m */; };
 		CC9130C52B62A33A006E3280 /* IKController.m in Sources */ = {isa = PBXBuildFile; fileRef = CC9130B32B62A33A006E3280 /* IKController.m */; };
 		CC9130C62B62A33A006E3280 /* IKIslandView.m in Sources */ = {isa = PBXBuildFile; fileRef = CC9130B42B62A33A006E3280 /* IKIslandView.m */; };
 		CC9130C82B62A33A006E3280 /* IKMusicCenter.m in Sources */ = {isa = PBXBuildFile; fileRef = CC9130B62B62A33A006E3280 /* IKMusicCenter.m */; };
+		1B8600C82B62A33A006E3280 /* IKLyricsTimeline.m in Sources */ = {isa = PBXBuildFile; fileRef = 1B8600B62B62A33A006E3280 /* IKLyricsTimeline.m */; };
+		4E7100C82B62A33A006E3280 /* IKNetLyrics.m in Sources */ = {isa = PBXBuildFile; fileRef = 4E7100B62B62A33A006E3280 /* IKNetLyrics.m */; };
+		2D9600C82B62A33A006E3280 /* IKPlaybackDiagnostic.m in Sources */ = {isa = PBXBuildFile; fileRef = 2D9600B62B62A33A006E3280 /* IKPlaybackDiagnostic.m */; };
+		D11900C82B62A33A006E3280 /* IKLocalAvatar.m in Sources */ = {isa = PBXBuildFile; fileRef = D11900B62B62A33A006E3280 /* IKLocalAvatar.m */; };
 		CC9130C92B62A33A006E3280 /* IKPrefs.m in Sources */ = {isa = PBXBuildFile; fileRef = CC9130B72B62A33A006E3280 /* IKPrefs.m */; };
 		CC9130D42B62A33A006E3280 /* IKNotificationSource.m in Sources */ = {isa = PBXBuildFile; fileRef = CC9130D52B62A33A006E3280 /* IKNotificationSource.m */; };
 		CC9130D62B62A33A006E3280 /* IKNotificationSource.m in Sources */ = {isa = PBXBuildFile; fileRef = CC9130D52B62A33A006E3280 /* IKNotificationSource.m */; };
@@ -223,6 +231,10 @@
 		CC9130B32B62A33A006E3280 /* IKController.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = IKController.m; sourceTree = "<group>"; };
 		CC9130B42B62A33A006E3280 /* IKIslandView.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = IKIslandView.m; sourceTree = "<group>"; };
 		CC9130B62B62A33A006E3280 /* IKMusicCenter.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = IKMusicCenter.m; sourceTree = "<group>"; };
+		1B8600B62B62A33A006E3280 /* IKLyricsTimeline.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = IKLyricsTimeline.m; sourceTree = "<group>"; };
+		4E7100B62B62A33A006E3280 /* IKNetLyrics.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = IKNetLyrics.m; sourceTree = "<group>"; };
+		2D9600B62B62A33A006E3280 /* IKPlaybackDiagnostic.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = IKPlaybackDiagnostic.m; sourceTree = "<group>"; };
+		D11900B62B62A33A006E3280 /* IKLocalAvatar.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = IKLocalAvatar.m; sourceTree = "<group>"; };
 		CC9130B72B62A33A006E3280 /* IKPrefs.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = IKPrefs.m; sourceTree = "<group>"; };
 		CC9130D52B62A33A006E3280 /* IKNotificationSource.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = IKNotificationSource.m; sourceTree = "<group>"; };
 		CC9130D72B62A33A006E3280 /* IKNotificationSource.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = IKNotificationSource.h; sourceTree = "<group>"; };
@@ -339,6 +351,10 @@
 				CC9130B32B62A33A006E3280 /* IKController.m */,
 				CC9130B42B62A33A006E3280 /* IKIslandView.m */,
 				CC9130B62B62A33A006E3280 /* IKMusicCenter.m */,
+				1B8600B62B62A33A006E3280 /* IKLyricsTimeline.m */,
+				4E7100B62B62A33A006E3280 /* IKNetLyrics.m */,
+				2D9600B62B62A33A006E3280 /* IKPlaybackDiagnostic.m */,
+				D11900B62B62A33A006E3280 /* IKLocalAvatar.m */,
 				CC9130B72B62A33A006E3280 /* IKPrefs.m */,
 				CC9130D72B62A33A006E3280 /* IKNotificationSource.h */,
 				CC9130D52B62A33A006E3280 /* IKNotificationSource.m */,
@@ -566,6 +582,10 @@
 				CC9130C02B62A33A006E3280 /* IKController.m in Sources */,
 				CC9130C12B62A33A006E3280 /* IKIslandView.m in Sources */,
 				CC9130C32B62A33A006E3280 /* IKMusicCenter.m in Sources */,
+				1B8600C32B62A33A006E3280 /* IKLyricsTimeline.m in Sources */,
+				4E7100C32B62A33A006E3280 /* IKNetLyrics.m in Sources */,
+				2D9600C32B62A33A006E3280 /* IKPlaybackDiagnostic.m in Sources */,
+				D11900C32B62A33A006E3280 /* IKLocalAvatar.m in Sources */,
 				CC9130C42B62A33A006E3280 /* IKPrefs.m in Sources */,
 				CC9130D42B62A33A006E3280 /* IKNotificationSource.m in Sources */,
 				CC654E112DABD9C200D54F83 /* HUDHelper.mm in Sources */,
@@ -614,6 +634,10 @@
 				CC9130C52B62A33A006E3280 /* IKController.m in Sources */,
 				CC9130C62B62A33A006E3280 /* IKIslandView.m in Sources */,
 				CC9130C82B62A33A006E3280 /* IKMusicCenter.m in Sources */,
+				1B8600C82B62A33A006E3280 /* IKLyricsTimeline.m in Sources */,
+				4E7100C82B62A33A006E3280 /* IKNetLyrics.m in Sources */,
+				2D9600C82B62A33A006E3280 /* IKPlaybackDiagnostic.m in Sources */,
+				D11900C82B62A33A006E3280 /* IKLocalAvatar.m in Sources */,
 				CC9130C92B62A33A006E3280 /* IKPrefs.m in Sources */,
 				CC9130D62B62A33A006E3280 /* IKNotificationSource.m in Sources */,
 				CC711D4A2B5BF5C6007235A6 /* HUDHelper.mm in Sources */,
@@ -707,7 +731,7 @@
 					"$(PROJECT_DIR)/libraries",
 				);
 				MARKETING_VERSION = 2.0;
-				PRODUCT_BUNDLE_IDENTIFIER = ch.xxtou.hudapp;
+				PRODUCT_BUNDLE_IDENTIFIER = com.YiChen.LDDMH;
 				PRODUCT_NAME = TrollSpeed;
 				PROVISIONING_PROFILE_SPECIFIER = "";
 				SUPPORTED_PLATFORMS = iphonesimulator;
@@ -752,7 +776,7 @@
 					"$(PROJECT_DIR)/libraries",
 				);
 				MARKETING_VERSION = 2.0;
-				PRODUCT_BUNDLE_IDENTIFIER = ch.xxtou.hudapp;
+				PRODUCT_BUNDLE_IDENTIFIER = com.YiChen.LDDMH;
 				PRODUCT_NAME = TrollSpeed;
 				PROVISIONING_PROFILE_SPECIFIER = "";
 				SUPPORTED_PLATFORMS = iphonesimulator;
@@ -932,7 +956,7 @@
 					"$(PROJECT_DIR)/libraries",
 				);
 				MARKETING_VERSION = 2.0;
-				PRODUCT_BUNDLE_IDENTIFIER = ch.xxtou.hudapp;
+				PRODUCT_BUNDLE_IDENTIFIER = com.YiChen.LDDMH;
 				PRODUCT_NAME = TrollSpeed;
 				PROVISIONING_PROFILE_SPECIFIER = "";
 				SUPPORTED_PLATFORMS = iphoneos;
@@ -981,7 +1005,7 @@
 					"$(PROJECT_DIR)/libraries",
 				);
 				MARKETING_VERSION = 2.0;
-				PRODUCT_BUNDLE_IDENTIFIER = ch.xxtou.hudapp;
+				PRODUCT_BUNDLE_IDENTIFIER = com.YiChen.LDDMH;
 				PRODUCT_NAME = TrollSpeed;
 				PROVISIONING_PROFILE_SPECIFIER = "";
 				SUPPORTED_PLATFORMS = iphoneos;

@@ -37,49 +37,71 @@ static UIColor *IKColorFromHex(NSString *hex, UIColor *fallback) {
     [h closeFile];
 }
 
-// 自动识别开孔位置。先问系统（私有接口，可能没有），问不到就按屏幕尺寸查表
+// 开孔（系统岛待机时的黑色胶囊）的位置和大小。
+// 能装巨魔的灵动岛机型只有 393 和 430 两种屏宽，这两种直接用系统自己的数值
+// （iOS 16.6 的 SBUISystemApertureLayoutMetrics：sensorRegionSize 为 125 或 125.33 × 36.67，距屏幕顶部 11.33）。
+// 其他尺寸先问系统的私有接口 -[UIScreen _exclusionArea]，问不到再用备用值
 + (CGRect)detectedIslandRect {
     UIScreen *screen = [UIScreen mainScreen];
     CGSize ss = screen.bounds.size;
     CGFloat sw = MIN(ss.width, ss.height), sh = MAX(ss.width, ss.height);
+    BOOL (^near)(CGFloat) = ^BOOL(CGFloat w) { return fabs(sw - w) < 0.6; };
+
     NSString *source = @"table";
-    CGRect r = CGRectZero;
-    @try {
-        SEL sel = NSSelectorFromString(@"_exclusionArea");
-        if ([screen respondsToSelector:sel]) {
-            id area = [screen valueForKey:@"_exclusionArea"];
-            if (area && [area respondsToSelector:NSSelectorFromString(@"rect")]) {
-                id v = [area valueForKey:@"rect"];
-                if ([v isKindOfClass:[NSValue class]]) r = [v CGRectValue];
-            }
-        }
-    } @catch (__unused NSException *e) {}
-    BOOL sane = r.size.width >= 80 && r.size.width <= 200 && r.size.height >= 25 && r.size.height <= 50
-        && r.origin.y >= 0 && r.origin.y < 40;
-    if (sane) {
-        source = @"system";
-        // 私有接口返回的横向坐标可能属于屏幕坐标系，统一按当前竖屏宽度居中。
-        r.origin.x = (sw - r.size.width) / 2.0;
+    CGSize size = CGSizeMake(126, 37.33);
+    CGFloat top = 11.33;
+    if (near(393)) {
+        size = CGSizeMake(125.0, 36.67);
+    } else if (near(430)) {
+        size = CGSizeMake(125.33, 36.67);
     } else {
-        // 动态岛机型的开孔宽度基本固定，顶部位置随屏幕宽度档位变化。
-        CGFloat top = (sw >= 401.5 && sw <= 402.5) || (sw >= 439.5 && sw <= 440.5) ? 14.0 : 11.33;
-        r = CGRectMake((sw - 126) / 2, top, 126, 37.33);
+        // 备用值。402、440、420 宽的三组是在 iOS 26.5 模拟器（iPhone 17 Pro、17 Pro Max、Air）里
+        // 用 _exclusionArea 读到的，没有在真机上核实；这些机型出厂就是 iOS 18 以上，本来也装不了巨魔。
+        // 再其他的尺寸用稍大一点的默认值
+        if (near(402))      { size = CGSizeMake(125.0, 36.67);  top = 14.0; }
+        else if (near(440)) { size = CGSizeMake(125.33, 36.67); top = 14.0; }
+        else if (near(420)) { size = CGSizeMake(125.33, 36.67); top = 20.0; }
+        source = @"fallback";
+        CGRect r = CGRectZero;
+        @try {
+            if ([screen respondsToSelector:NSSelectorFromString(@"_exclusionArea")]) {
+                id area = [screen valueForKey:@"_exclusionArea"];
+                if (area && [area respondsToSelector:NSSelectorFromString(@"rect")]) {
+                    id v = [area valueForKey:@"rect"];
+                    if ([v isKindOfClass:[NSValue class]]) r = [v CGRectValue];
+                }
+            }
+        } @catch (__unused NSException *e) {}
+        BOOL sane = r.size.width >= 80 && r.size.width <= 200 && r.size.height >= 25 && r.size.height <= 50
+            && r.origin.y >= 0 && r.origin.y < 40;
+        if (sane) {
+            source = @"system";
+            size = r.size;
+            top = r.origin.y;
+        }
     }
-    [IKPrefs log:[NSString stringWithFormat:@"geometry screen=%.0fx%.0f scale=%.0f island=%@ source=%@",
-                  sw, sh, screen.scale, NSStringFromCGRect(r), source]];
-    return r;
+    CGRect rect = CGRectMake((sw - size.width) / 2, top, size.width, size.height);
+
+    static NSString *lastLogged;
+    NSString *line = [NSString stringWithFormat:@"geometry screen=%.0fx%.0f scale=%.0f island=%@ source=%@",
+                      sw, sh, screen.scale, NSStringFromCGRect(rect), source];
+    if (![line isEqualToString:lastLogged]) {
+        lastLogged = line;
+        [IKPrefs log:line];
+    }
+    return rect;
 }
 
 + (double)windowLevelFromFile {
     NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:IKPrefsPath];
     NSInteger boost = [d[@"windowLevelBoost"] integerValue];
-    // 覆盖模式默认启用最高层级，避免用户还要手动试验层级才能盖住系统岛。
-    if ([d[@"placement"] integerValue] != 0 && !d[@"windowLevelBoost"]) boost = 2;
-    double level = 10000010.0; // TrollSpeed 原来的值
-    if (boost == 1) level = 100000000.0;
-    if (boost >= 2) level = 2147483000.0;
-    [IKPrefs log:[NSString stringWithFormat:@"windowLevel boost=%ld level=%.0f", (long)boost, level]];
-    return level;
+    // 覆盖系统岛时，自动档必须压过系统岛的遮罩。用户在真机上确认过，
+    // 标准层级虽然高于系统岛内容，但启动时仍可能被系统岛场景压住。
+    BOOL coveringIsland = [d[@"placement"] integerValue] != 0;
+    if (coveringIsland && boost == 0) return IKWindowLevelHighest;
+    if (boost == 1) return IKWindowLevelHigher;
+    if (boost >= 2) return IKWindowLevelHighest;
+    return IKWindowLevelStandard;
 }
 
 - (void)reload {
@@ -93,6 +115,9 @@ static UIColor *IKColorFromHex(NSString *hex, UIColor *fallback) {
         id v = d[k];
         return v ? [v doubleValue] : def;
     };
+    double (^clamp)(double, double, double) = ^double(double v, double lo, double hi) {
+        return MIN(hi, MAX(lo, v));
+    };
 
     self.enabled        = b(@"enabled", YES);
     self.notifEnabled   = b(@"notif", YES);
@@ -100,13 +125,28 @@ static UIColor *IKColorFromHex(NSString *hex, UIColor *fallback) {
     self.spinEnabled    = b(@"spin", YES);
     self.pauseStopsSpin = b(@"pauseStops", YES);
     self.lyricLines     = n(@"lyricLines", 2) >= 2 ? 2 : 1;
+    NSNumber *alignment = d[@"lyricAlignment"];
+    NSInteger value = [alignment isKindOfClass:NSNumber.class] ? alignment.integerValue : 0;
+    self.lyricAlignment = value >= 1 && value <= 3 ? value : 0;
+    self.lyricOffsetX   = clamp(n(@"lyricOffsetX", 0), -120, 120);
+    self.lyricOffsetY   = clamp(n(@"lyricOffsetY", 0), -12, 12);
+    NSInteger style = [d[@"defaultMusicView"] isKindOfClass:NSNumber.class] ? [d[@"defaultMusicView"] integerValue] : 0;
+    self.musicStyle     = style >= 0 && style <= 2 ? style : 0;
+    self.defaultCompact = (self.musicStyle == 1);
+    self.recordIndicator = b(@"recordIndicator", YES);
+    self.netLyrics      = b(@"netLyrics", YES);
     self.spinSeconds    = MAX(1.0, n(@"spinSeconds", 8));
     self.notifDuration  = MAX(1.0, n(@"notifDuration", 5));
-    // 岛的位置和大小：plist 里写了就用写的，否则按机型自动识别
+    // 岛的位置和大小：plist 里写了就用写的，否则按机型识别
     CGRect auto_ = [IKPrefs detectedIslandRect];
     self.islandTop      = n(@"islandTop", auto_.origin.y);
     self.cutoutWidth    = n(@"cutoutWidth", auto_.size.width);
     self.cutoutHeight   = n(@"cutoutHeight", auto_.size.height);
+    self.coverExtraWidth  = clamp(n(@"coverExtraWidth", 3), -12, 40);
+    self.coverExtraHeight = clamp(n(@"coverExtraHeight", 3), -8, 16);
+    self.coverOffsetY     = clamp(n(@"coverOffsetY", 0), -10, 10);
+    self.coverCompactSide = clamp(n(@"coverCompactSide", 66), 40, 120);
+    self.calibrateUntil   = n(@"calibrateUntil", 0);
     self.transitionStyle  = (NSInteger)n(@"transitionStyle", 0);
     self.windowLevelBoost = (NSInteger)n(@"windowLevelBoost", 0);
     self.placement      = (NSInteger)n(@"placement", 0);
@@ -118,10 +158,14 @@ static UIColor *IKColorFromHex(NSString *hex, UIColor *fallback) {
 
     UIColor *lime = [UIColor colorWithRed:0xB8 / 255.0 green:0xF3 / 255.0 blue:0x4A / 255.0 alpha:1];
     self.accent = IKColorFromHex(d[@"accent"], lime);
+    self.notifTitleColor = IKColorFromHex(d[@"notifTitleColor"], [UIColor whiteColor]);
+    self.notifMessageColor = IKColorFromHex(d[@"notifMessageColor"], [UIColor colorWithWhite:1 alpha:0.66]);
 
     self.lyricColorMode = (NSInteger)n(@"lyricColorMode", 0);
+    self.titleColorMode = (NSInteger)n(@"titleColorMode", 3);
     self.ringColorMode  = (NSInteger)n(@"ringColorMode", 1);
     self.lyricColor     = IKColorFromHex(d[@"lyricColor"], lime);
+    self.titleColor     = IKColorFromHex(d[@"titleColor"] ?: d[@"songTitleColor"], [UIColor whiteColor]);
     self.ringColor      = IKColorFromHex(d[@"ringColor"], lime);
     self.lyricEffect    = (NSInteger)n(@"lyricEffect", 1);
     self.lyricFontSize  = MIN(18, MAX(13, n(@"lyricFontSize", 16)));

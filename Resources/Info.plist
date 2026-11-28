@@ -13,22 +13,22 @@
 	<key>CFBundleIconName</key>
 	<string>AppIcon</string>
 	<key>CFBundleIdentifier</key>
-	<string>ch.xxtou.hudapp</string>
+	<string>com.YiChen.LDDMH</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
-	<string>TrollSpeed</string>
+	<string>灵动岛美化</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>2.0</string>
+	<string>0.6.7</string>
 	<key>CFBundleSignature</key>
 	<string>????</string>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>
 			<key>CFBundleURLName</key>
-			<string>ch.xxtou.hudapp</string>
+			<string>com.YiChen.LDDMH</string>
 			<key>CFBundleURLSchemes</key>
 			<array>
 				<string>trollspeed</string>
@@ -36,7 +36,7 @@
 		</dict>
 	</array>
 	<key>CFBundleVersion</key>
-	<string>c016dd82</string>
+	<string>19</string>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.developer-tools</string>
 	<key>NSHumanReadableCopyright</key>
@@ -51,7 +51,7 @@
 			<key>UIApplicationShortcutItemTitle</key>
 			<string>Toggle HUD</string>
 			<key>UIApplicationShortcutItemType</key>
-			<string>ch.xxtou.shortcut.toggle-hud</string>
+			<string>com.YiChen.LDDMH.shortcut.toggle-hud</string>
 		</dict>
 	</array>
 	<key>UIApplicationShowsViewsWhileLocked</key>

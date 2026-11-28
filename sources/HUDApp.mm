@@ -196,5 +196,10 @@ int main(int argc, char *argv[])
             }
             else return EXIT_SUCCESS;  // No PID file, so HUD is not running
         }
+        else if (strcmp(argv[1], "-ik-data") == 0)
+        {
+            // 设置 App 以 root 身份启动这一步：把悬浮进程（root）建的数据目录改回 mobile 可写
+            return IKRepairDataDirectory() ? EXIT_SUCCESS : EXIT_FAILURE;
+        }
     }
 }
