@@ -178,6 +178,8 @@ static void testEvidenceExport(IKMusicCenter *center) {
           [report containsString:@"lyric events app=com.tencent.QQMusic side=player absent"], "export lists field changes from both sides");
     check([report containsString:@"lyric latency app=com.netease.cloudmusic paired=4 positionMatched=4 positionMissing=0 positionIgnored=0 ambiguous=0 unmatched="] &&
           [report containsString:@" min=0.03"], "export measures the delay between the player and the HUD");
+    check([report containsString:@"lyric probe names app=com.netease.cloudmusic version=? captured=? checked=0 confirmed=1 complete=0"] &&
+          [report containsString:@"lyric probe names app=com.tencent.QQMusic absent"], "export says what the names check covered");
     check([report containsString:@"\n  Library/Caches/KaraokeCache/lyric/<num>.qrc"] && [report containsString:@"\n  Library/Caches/<word>Store/lyric/<num>.qrc"] &&
           [report containsString:@"confirmedNames=1 "] && ![report containsString:@"Quux"] && ![report containsString:@"bad name"],
           "export shows directory names the probe confirmed, and only those");
@@ -267,6 +269,44 @@ static void testRoundAttribution(IKMusicCenter *center) {
     events = hudEvents(@"com.netease.cloudmusic");
     check(events.count == count + 1 && events.lastObject[5].unsignedIntegerValue == 3 && events.lastObject[6].unsignedIntegerValue == 4 &&
           events.lastObject[0].doubleValue >= fresher && [center.title isEqual:@"第五首"], "the newer round is shown and recorded");
+
+    // #140: rounds 1 and 2 are both applied, round 2's app ID returns first and round 1's last.
+    // Both are recorded, in the order the island showed them, each with its own arrival time.
+    delayInfo = NO;
+    metadata = @{@"Title":@"第六首歌", @"Artist":@"六号", @"Duration":@166, @"ElapsedTime":@6, @"QueueIndex":@35};
+    double from1 = NSProcessInfo.processInfo.systemUptime;
+    [center refresh];
+    double to1 = NSProcessInfo.processInfo.systemUptime;
+    void (^app5)(NSString *) = bundleReply;
+    usleep(20000);
+    metadata = @{@"Title":@"第七首歌曲", @"Artist":@"七号歌手", @"Duration":@155, @"ElapsedTime":@7, @"QueueIndex":@36};
+    double from2 = NSProcessInfo.processInfo.systemUptime;
+    [center refresh];
+    double to2 = NSProcessInfo.processInfo.systemUptime;
+    void (^app6)(NSString *) = bundleReply;
+    count = hudEvents(@"com.netease.cloudmusic").count;
+    app6(bundle);
+    check(hudEvents(@"com.netease.cloudmusic").count == count, "a later round waits while an earlier applied round has no app ID yet");
+    app5(bundle);
+    events = hudEvents(@"com.netease.cloudmusic");
+    check(events.count == count + 2 && events[count][5].unsignedIntegerValue == 4 && events[count + 1][5].unsignedIntegerValue == 5 &&
+          events[count][0].doubleValue >= from1 && events[count][0].doubleValue <= to1 &&
+          events[count + 1][0].doubleValue >= from2 && events[count + 1][0].doubleValue <= to2,
+          "the earlier round is not lost when its app ID returns last, and the order is kept");
+
+    // An applied round whose app ID never returns is dropped after the wait, and does not hold back later rounds.
+    double wait = IKRoundWait;
+    IKRoundWait = 0.2;
+    metadata = @{@"Title":@"无应用号", @"Artist":@"八号", @"Duration":@144, @"ElapsedTime":@8, @"QueueIndex":@37};
+    [center refresh];
+    usleep(300000);
+    delayBundle = NO;
+    metadata = @{@"Title":@"第九首歌曲名", @"Artist":@"九号", @"Duration":@133, @"ElapsedTime":@9, @"QueueIndex":@38};
+    count = hudEvents(@"com.netease.cloudmusic").count;
+    [center refresh];
+    events = hudEvents(@"com.netease.cloudmusic");
+    check(events.count == count + 1 && events.lastObject[5].unsignedIntegerValue == 6, "a round that never learns its app is dropped, not guessed");
+    IKRoundWait = wait;
     delayBundle = NO;
     delayInfo = NO;
 }

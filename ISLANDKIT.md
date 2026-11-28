@@ -74,7 +74,11 @@ QQ 音乐、网易云音乐各有一个适配器。0.6.4 可以使用宿主播�
 - 名字含 View、Cell、Button、Label、Layer 的类（ViewModel 除外）排在后面，先把额度给更像数据和逻辑的类。
 - 第二次采样里新出现的类标 `late`，通常来自放歌时才加载的框架。
 - 采样前在 `lyric-probe-sampling.plist` 里给这次采样（`launch` 或 `playback`）记一次，类清单文件写成功后才清掉这一种；写失败（磁盘满、文件过大）也算没采完。同一个播放器版本里，某一种连续两次没采完（例如采样时进程被杀），这一种就不再尝试，另一种照常采。早期格式只有一个总次数，读到时按两种各记这个次数处理。导出里会有一行 `class sampling unfinished launch=… playback=…`。
-- 每次采样还会列出本容器 `Documents`、`Library`、`tmp` 下的目录名（和容器扫描同样的深度、条目、时间上限，不跟随链接），挑出报告里会被遮成 `<word>` 的那些字母数字串，到主程序和包内框架的 `__TEXT,__cstring`（常量字符串区）里找。某个串作为完整的字母数字串出现在那里，就说明它是播放器写死的名字，记进 `lyric-probe-names.plist`。只记录确认过的名字，常量区的其他内容不保存。查找最多 1.5 秒，超时会标 `complete=0`。
+- 每次采样还会核对本容器 `Library`、`tmp` 下的目录名是不是写死在播放器里。只看这两处，因为 iOS 不给用户在这里建文件夹的办法；`Documents` 可以通过“文件”App 建文件夹，所以不看。
+  - 候选只有“可确认”的完整目录名：可打印 ASCII，不含空格、`/`、`@`、`<`、`>`，不超过 64 个字符，报告里有一部分会被遮成 `<word>`，而且被遮的部分连着一个三个字母以上的已知词，例如 `KaraokeCache`、`karaoke_cache`。单个词（`Yellow`）、两个未知词（`JohnSmith`）、带空格的名字都不是候选，不管二进制里有什么。
+  - 到主程序和包内框架的 `__TEXT,__cstring`（常量字符串区）里找：整个目录名必须作为一个完整的路径段出现，即两头是字符串的开头、结尾或 `/`。`Library/Caches/KaraokeCache` 能确认 `KaraokeCache`，确认不了 `KaraokeCacheOld`，`Karaoke-Cache` 也确认不了 `Karaoke`。
+  - 确认过的名字记进 `lyric-probe-names.plist`，常量区的其他内容不保存。
+  - 上限：目录遍历和字符串查找各 1.5 秒，遍历最多 2 万个条目，候选最多 2000 个。遍历在目录内部每 64 个条目查一次时间，查找每读 64 KB 查一次时间。遍历被截断、有目录读不了、候选或查找被截断时，记 `complete=0`；已经确认的名字仍然有效，只是可能还有名字没核对到。
 
 字段变化的时刻取自 `-[MPNowPlayingInfoCenter setNowPlayingInfo:]`。探针把这个方法包了一层：先读系统运行时间，调用原来的实现，再比较标题、歌手、专辑和上一次是否相同。
 
@@ -86,7 +90,9 @@ QQ 音乐、网易云音乐各有一个适配器。0.6.4 可以使用宿主播�
 
 ### 悬浮端的时刻
 
-`IKMusicCenter` 收到系统的“正在播放”变化时，用同一套规则（`IKLyricEventLog`）记一条。记录的是“岛拿到并用上了什么、在什么时刻”：只有悬浮端实际应用的字典才算，时间取它送到的那一刻。字典送到时如果新一轮请求已经开始，悬浮端会丢掉它，记录里也不算。归属的播放器取同一轮请求返回的应用 ID：字典先到、应用 ID 后到时，等应用 ID 到了再记，每轮只记一次；应用 ID 晚到新一轮开始之后也照样记，因为这一轮的字典当时已经显示在岛上了，改记到下一轮会把延迟算长。比已记录的轮次更旧的结果丢弃，保证记录按顺序。文件是 `/var/mobile/Library/IslandKit/lyric-hud-events-<小写 bundle ID>.plist`。两边读的是同一个系统运行时间，可以直接相减。
+`IKMusicCenter` 收到系统的“正在播放”变化时，用同一套规则（`IKLyricEventLog`）记一条。记录的是“岛拿到并用上了什么、在什么时刻”：只有悬浮端实际应用的字典才算，时间取它送到的那一刻。字典送到时如果新一轮请求已经开始，悬浮端会丢掉它，记录里也不算。
+
+应用过的字典按应用的先后排队，各自等同一轮请求返回的应用 ID，到了就记到那个播放器，每轮只记一次。前面一轮的应用 ID 还没到时，后面已经知道应用 ID 的轮次也先等着，所以应用 ID 返回的先后不影响结果：哪一轮都不会丢，记录顺序和岛上显示的顺序一致。一轮等了 3 秒还没等到自己的应用 ID，就丢掉这一轮，不去猜是哪个播放器，后面的轮次接着记。文件是 `/var/mobile/Library/IslandKit/lyric-hud-events-<小写 bundle ID>.plist`。两边读的是同一个系统运行时间，可以直接相减。
 
 应用 ID 和字典是两次独立的系统请求。如果恰好在两次请求之间换了播放器，仍可能把一条记到错误的播放器上；系统接口没有办法把两者绑在一起。
 
@@ -112,12 +118,13 @@ QQ 音乐、网易云音乐各有一个适配器。0.6.4 可以使用宿主播�
 
 - 目录名里保留的词：含关键词的词、技术词表里的词（`Documents`、`Caches`、`Application`、`Support`、`download`、`cache`、`song`、`tencent`、`netease`、`cloudmusic` 等，见 `sources/IKLyricEvidence.m` 的 `IKVocabulary`）、两个字母以内的词、四个字母以内的大写缩写（`QQ`、`MMKV`、`HTTP`）。所以 `Application Support`、`com.tencent.QQMusic`、`LyricCache` 原样保留，`johnsmith` 变成 `<word>`，`QQJohnCache` 变成 `QQ<word>Cache`。
 - 文件主名更严：只有含关键词时才保留词表里的词，例如 `lyric_cache.db`、`QQLyricCache_v2.plist`。`Hello.lrc`、`index.json` 分别是 `<word>.lrc`、`<word>.json`，哪怕目录里只有这一个文件。扩展名保留词表里的词和四个字母以内的词，`Mr.Brightside` 的扩展名也是 `<word>`。
-- 播放器写死、但不在词表里的英文目录名，靠探针确认：`lyric-probe-names.plist` 里的名字（只接受 1–64 个字母数字、至少一个字母、属于这款播放器）在目录名里原样显示，例如 `KaraokeCache`。摘要里的 `confirmedNames=` 是靠确认才显示出来的目录名数量。数字、十六进制、UUID、长 ID 形状的串即使被确认也照样遮蔽。账号名、歌名不会写在播放器二进制里，所以还是 `<word>`。
-- 没有注入探针、名字是运行时拼出来的、或者是 Swift 的 15 字节以内短字符串（编进指令里，不在常量区）时，确认不了，仍显示 `<word>`。用户自己起的目录名恰好和播放器常量区里某个完整的串一样时（例如一个叫 `Yellow` 的目录），会被显示出来。
+- 播放器写死、但不在词表里的英文目录名，靠探针确认后原样显示，例如 `KaraokeCache`。设置 App 读回 `lyric-probe-names.plist` 时把它当不可信输入：每个名字重新按上面“可确认”的规则检查，而且只用于 `Library`、`tmp` 下的目录。所以即使文件里列了 `JohnSmith`、`Yellow` 或 `Documents` 下的文件夹，报告里也不会显示。名字里数字、十六进制、UUID、长 ID 形状的部分照样遮蔽。摘要里的 `confirmedNames=` 是靠确认才显示出来的目录名数量，导出里另有一行 `lyric probe names app=… checked=… confirmed=… complete=…` 说明核对的范围。
+- 仍会显示用户信息的情况：播放器自己在 `Library` 或 `tmp` 下按用户数据建了一个复合名字的目录，这个名字又恰好和二进制常量区里的某个完整路径段一模一样。能和公开发布的二进制里的常量一字不差，说明它不是这个用户独有的字符串。
+- 没有注入探针、名字是运行时拼出来的、是 Swift 的 15 字节以内短字符串（编进指令里，不在常量区）、或者是单个词时，确认不了，仍显示 `<word>`。
 - 上限：目录深 10 层（`Documents` 算第 1 层）、6 万个目录项、240 行、读 600 次文件头、6 秒。触到哪个上限，`limited=` 里就写哪个。`complete=1` 只表示所有目录都打开了、所有匹配的文件都读到并列出、没有触到任何上限；有打不开的目录或读不了的文件（`unreadable` 不为 0）、或触到任何一个上限，都是 `complete=0`。
 - 关键词含 krc（酷狗格式）。播放诊断里本地媒体旁的同名文件、导出样本文件夹检查，也都认 `.krc`。
 - 名字含关键词的目录和它下面的目录优先读，避免一个无关的大缓存先把上限用完。
-- 不跟随符号链接。目录从容器根起一层一层打开，每一层都拒绝符号链接，所以扫描途中有目录被换成链接，也不会读到容器外面。文件头、文件类型和大小在同一个文件描述符上读取，打开时同样拒绝链接，也不会被换进来的管道文件卡住。跳过 `Library/IslandKit`。
+- 不跟随符号链接。容器根本身是链接时直接拒绝；目录从容器根起一层一层打开，每一层都拒绝符号链接，所以扫描途中有目录被换成链接，也不会读到容器外面。文件头、文件类型和大小在同一个文件描述符上读取，打开时同样拒绝链接，也不会被换进来的管道文件卡住。跳过 `Library/IslandKit`。
 
 ### 导出的文本
 
@@ -137,6 +144,7 @@ lyric events app=com.tencent.QQMusic side=player captured=… kept=… total=…
 lyric events app=com.tencent.QQMusic side=hud captured=… kept=… total=…
   t=81234.530 pos=63.20 rate=1.00 dur=215.0 changed=artist len=12
 lyric latency app=com.tencent.QQMusic paired=55 positionMatched=50 positionMissing=4 positionIgnored=1 ambiguous=2 unmatched=1 player=60 hud=58 min=… median=… p90=… max=… (seconds, HUD seen minus player set)
+lyric probe names app=com.tencent.QQMusic version=… captured=… checked=… confirmed=… complete=1
 container scan app=com.tencent.QQMusic directories=… entries=… matched=… rows=… unlisted=… symlinks=… unreadable=… tooDeep=… confirmedNames=… complete=1 limited=none seconds=…
   Library/…/Lyric/ directory
   Library/…/Lyric/<num>.qrc ext=qrc files=132 bytes=1204..8830 header=binary sampled=8
@@ -157,7 +165,7 @@ container scan app=com.tencent.QQMusic directories=… entries=… matched=… r
 
 - 没有在真机的 QQ 音乐、网易云音乐里运行过。类清单的实际规模、两款播放器是否允许注入后正常启动，都要等真机结果。
 - 只看数据容器里的三个目录。App Group 共享容器没有看。
-- 目录名确认只查 `__TEXT,__cstring`。Swift 短字符串、运行时拼接的名字确认不了，仍是 `<word>`。
+- 目录名确认只查 `__TEXT,__cstring`，只看 `Library`、`tmp`，只确认复合名字。`Documents` 下写死的名字、单个词的名字、Swift 短字符串、运行时拼接的名字确认不了，仍是 `<word>`。
 - 只知道类和方法叫什么，不知道哪个对象属于正在播放的歌。这要等拿到清单后再定下一步挂哪个方法。
 
 ## 和系统岛的层级关系

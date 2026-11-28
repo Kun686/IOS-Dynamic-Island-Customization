@@ -102,19 +102,24 @@ static BOOL IKKeepWord(NSString *word, IKRedactMode mode, BOOL keywordStem) {
     }
 }
 
-// One run of letters and digits, split into words: "QQLyricCache2x" is QQ, Lyric, Cache, 2, x.
+// The end of the word that starts at `i` in a run of letters and digits: "QQLyricCache2x" is QQ, Lyric, Cache, 2, x.
+static NSUInteger IKWordEnd(const unichar *s, NSUInteger i, NSUInteger end) {
+    NSUInteger j = i + 1;
+    if (IKDigit(s[i])) {
+        while (j < end && IKDigit(s[j])) j++;
+    } else if (IKUpper(s[i]) && j < end && IKUpper(s[j])) {
+        while (j < end && IKUpper(s[j])) j++;
+        if (j < end && IKLower(s[j])) j--;  // the last capital starts the next word
+    } else {
+        while (j < end && IKLower(s[j])) j++;
+    }
+    return j;
+}
+
 static void IKAppendRun(NSMutableString *out, const unichar *s, NSUInteger i, NSUInteger end, IKRedactMode mode, BOOL keywordStem) {
     BOOL masked = NO;
     while (i < end) {
-        NSUInteger j = i + 1;
-        if (IKDigit(s[i])) {
-            while (j < end && IKDigit(s[j])) j++;
-        } else if (IKUpper(s[i]) && j < end && IKUpper(s[j])) {
-            while (j < end && IKUpper(s[j])) j++;
-            if (j < end && IKLower(s[j])) j--;  // the last capital starts the next word
-        } else {
-            while (j < end && IKLower(s[j])) j++;
-        }
+        NSUInteger j = IKWordEnd(s, i, end);
         NSString *word = [NSString stringWithCharacters:s + i length:j - i];
         if (IKDigit(s[i])) {
             [out appendString:word.length >= 5 ? @"<num>" : word];
@@ -130,7 +135,7 @@ static void IKAppendRun(NSMutableString *out, const unichar *s, NSUInteger i, NS
     }
 }
 
-static NSString *IKRedact(NSString *segment, IKRedactMode mode, NSSet<NSString *> *fixed, NSMutableArray<NSString *> *masked) {
+static NSString *IKRedact(NSString *segment, IKRedactMode mode) {
     if (![segment isKindOfClass:NSString.class] || !segment.length) return @"<empty>";
     NSUInteger n = segment.length;
     if (n > 64) return @"<long>";
@@ -156,42 +161,44 @@ static NSString *IKRedact(NSString *segment, IKRedactMode mode, NSSet<NSString *
         if (digits == length) [out appendString:@"<num>"];
         else if (hex && length >= 8 && (digits || length >= 16)) [out appendString:@"<hex>"];
         else if (length >= 20 && digits >= 4) [out appendString:@"<id>"];
-        else {
-            NSString *run = [NSString stringWithCharacters:s + i length:length];
-            if (mode == IKRedactDirectory && [fixed containsObject:run]) {
-                [out appendString:run];
-            } else {
-                NSUInteger before = out.length;
-                IKAppendRun(out, s, i, j, mode, keywordStem);
-                if (masked && [[out substringFromIndex:before] containsString:@"<word>"]) [masked addObject:run];
-            }
-        }
+        else IKAppendRun(out, s, i, j, mode, keywordStem);
         i = j;
     }
     return out;
 }
 
-NSString *IKRedactPathSegment(NSString *segment) { return IKRedact(segment, IKRedactDirectory, nil, nil); }
-NSString *IKRedactImageSegment(NSString *segment) { return IKRedact(segment, IKRedactImage, nil, nil); }
-NSString *IKRedactPathSegmentKeeping(NSString *segment, NSSet<NSString *> *fixed) {
-    return IKRedact(segment, IKRedactDirectory, [fixed isKindOfClass:NSSet.class] ? fixed : nil, nil);
-}
+NSString *IKRedactPathSegment(NSString *segment) { return IKRedact(segment, IKRedactDirectory); }
+NSString *IKRedactImageSegment(NSString *segment) { return IKRedact(segment, IKRedactImage); }
 
-NSArray<NSString *> *IKMaskedRuns(NSString *segment) {
-    NSMutableArray<NSString *> *runs = [NSMutableArray array];
-    IKRedact(segment, IKRedactDirectory, nil, runs);
-    return runs;
-}
-
-static BOOL IKNameText(id value) {
-    if (![value isKindOfClass:NSString.class] || ![value length] || [value length] > 64) return NO;
-    BOOL letter = NO;
-    for (NSUInteger i = 0; i < [value length]; i++) {
-        unichar c = [value characterAtIndex:i];
-        if (!IKAlnum(c)) return NO;
-        letter |= !IKDigit(c);
+BOOL IKConfirmableName(NSString *segment) {
+    if (![segment isKindOfClass:NSString.class] || !segment.length || segment.length > 64) return NO;
+    NSUInteger n = segment.length;
+    unichar s[64];
+    [segment getCharacters:s range:NSMakeRange(0, n)];
+    for (NSUInteger i = 0; i < n; i++)
+        if (s[i] <= 0x20 || s[i] > 0x7e || s[i] == '/' || s[i] == '@' || s[i] == '<' || s[i] == '>') return NO;
+    if (![IKRedact(segment, IKRedactDirectory) containsString:@"<word>"]) return NO;  // nothing hidden, nothing to confirm
+    // The hidden part must be joined to a known word of three letters or more, as in KaraokeCache or karaoke_cache.
+    // A bare word (Yellow) or two unknown words (JohnSmith) never qualify, whatever the binary contains.
+    for (NSUInteger i = 0; i < n;) {
+        if (!IKAlnum(s[i])) { i++; continue; }
+        NSUInteger end = i;
+        while (end < n && IKAlnum(s[end])) end++;
+        for (NSUInteger k = i; k < end;) {
+            NSUInteger j = IKWordEnd(s, k, end);
+            NSString *word = [NSString stringWithCharacters:s + k length:j - k];
+            if (!IKDigit(s[k]) && word.length >= 3 && (IKEvidenceKeyword(word) || [IKVocabulary() containsObject:word.lowercaseString])) return YES;
+            k = j;
+        }
+        i = end;
     }
-    return letter;
+    return NO;
+}
+
+NSString *IKRedactPathSegmentKeeping(NSString *segment, NSSet<NSString *> *fixed) {
+    // A confirmed name keeps its words. Numbers and ID shapes inside it are still replaced.
+    if ([fixed isKindOfClass:NSSet.class] && [fixed containsObject:segment] && IKConfirmableName(segment)) return IKRedact(segment, IKRedactImage);
+    return IKRedact(segment, IKRedactDirectory);
 }
 
 NSSet<NSString *> *IKProbeConfirmedNames(NSDictionary *p, NSString *bundle) {
@@ -201,10 +208,11 @@ NSSet<NSString *> *IKProbeConfirmedNames(NSDictionary *p, NSString *bundle) {
         ![p[@"names"] isKindOfClass:NSArray.class]) return names;
     for (id name in p[@"names"]) {
         if (names.count >= 2000) break;
-        if (IKNameText(name)) [names addObject:name];
+        if (IKConfirmableName(name)) [names addObject:name];
     }
     return names;
 }
+
 
 NSString *IKRedactFileName(NSString *name, NSString **extension) {
     if (extension) *extension = @"";
@@ -216,11 +224,11 @@ NSString *IKRedactFileName(NSString *name, NSString **extension) {
         NSCharacterSet *allowed = [NSCharacterSet characterSetWithCharactersInString:
             @"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"];
         if ([tail rangeOfCharacterFromSet:allowed.invertedSet].location == NSNotFound) {
-            ext = IKRedact(tail.lowercaseString, IKRedactExtension, nil, nil);
+            ext = IKRedact(tail.lowercaseString, IKRedactExtension);
             stem = [name substringToIndex:dot.location];
         }
     }
-    NSString *shown = IKRedact(stem, IKRedactStem, nil, nil);
+    NSString *shown = IKRedact(stem, IKRedactStem);
     if (extension) *extension = ext;
     return ext.length ? [NSString stringWithFormat:@"%@.%@", shown, ext] : shown;
 }
@@ -231,7 +239,7 @@ static BOOL IKImagePathText(id value) {
     NSArray<NSString *> *parts = [value componentsSeparatedByString:@"/"];
     if (parts.count > 8) return NO;
     for (NSString *part in parts)
-        if (!part.length || ![IKRedact(part, IKRedactImage, nil, nil) isEqual:part]) return NO;
+        if (!part.length || ![IKRedact(part, IKRedactImage) isEqual:part]) return NO;
     return YES;
 }
 
@@ -392,6 +400,16 @@ NSString *IKProbeGuardReport(NSDictionary *marker, NSString *bundle) {
     NSString *note = stopped.count ? [NSString stringWithFormat:@" (%@ sampling stopped for this version)", [stopped componentsJoinedByString:@"+"]] : @"";
     return [NSString stringWithFormat:@"lyric probe app=%@ version=%@ class sampling unfinished %@%@", bundle,
             IKPlayerVersion(marker[@"version"]), [parts componentsJoinedByString:@" "], note];
+}
+
+NSString *IKProbeNamesReport(NSDictionary *p, NSString *bundle) {
+    if (![bundle isKindOfClass:NSString.class]) return nil;
+    if (![p isKindOfClass:NSDictionary.class] || ![p[@"schema"] isEqual:@1] || ![p[@"bundleID"] isKindOfClass:NSString.class] ||
+        [p[@"bundleID"] caseInsensitiveCompare:bundle] != NSOrderedSame)
+        return [NSString stringWithFormat:@"lyric probe names app=%@ absent", bundle];
+    return [NSString stringWithFormat:@"lyric probe names app=%@ version=%@ captured=%@ checked=%lu confirmed=%lu complete=%d", bundle,
+            IKPlayerVersion(p[@"version"]), IKCaptured(p[@"wall"]), (unsigned long)IKCount(p[@"checked"], 100000),
+            (unsigned long)IKProbeConfirmedNames(p, bundle).count, [p[@"complete"] isEqual:@YES]];
 }
 
 #pragma mark - Field change events

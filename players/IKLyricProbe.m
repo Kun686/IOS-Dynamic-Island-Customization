@@ -220,66 +220,74 @@ BOOL IKProbeSaveSample(NSURL *directory, NSDictionary *packet, NSString *trigger
 
 #pragma mark - Fixed directory names
 
-static BOOL IKProbeAlnum(uint8_t c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'); }
-
 static uint32_t IKProbeHash(const uint8_t *bytes, size_t length) {
     uint32_t hash = 2166136261u;
     for (size_t i = 0; i < length; i++) hash = (hash ^ bytes[i]) * 16777619u;
     return hash;
 }
 
-NSSet<NSString *> *IKProbeConfirmNames(NSArray<NSString *> *runs, NSArray<NSArray<NSString *> *> *images, double seconds, BOOL *complete) {
-    if (complete) *complete = YES;
+NSSet<NSString *> *IKProbeConfirmNames(NSArray<NSString *> *names, NSArray<NSArray<NSString *> *> *images, double seconds, BOOL *complete) {
+    BOOL whole = YES;
     NSMutableSet<NSString *> *found = [NSMutableSet set];
-    // Open addressing over the candidate runs. Runs are ASCII letters and digits, at most 64 long.
-    NSMutableArray<NSData *> *names = [NSMutableArray array];
-    uint64_t lengths = 0;
-    for (NSString *run in runs) {
-        NSData *bytes = [run dataUsingEncoding:NSASCIIStringEncoding];
-        if (bytes.length < 1 || bytes.length > 63 || names.count >= 4096) continue;
-        [names addObject:bytes];
-        lengths |= 1ull << bytes.length;
+    // Open addressing over the candidate names, 1 to 64 printable ASCII characters.
+    NSMutableArray<NSData *> *candidates = [NSMutableArray array];
+    BOOL used[65] = {NO};
+    for (NSString *name in names) {
+        NSData *bytes = [name isKindOfClass:NSString.class] ? [name dataUsingEncoding:NSASCIIStringEncoding] : nil;
+        if (bytes.length < 1 || bytes.length > 64) continue;
+        if (candidates.count >= 4096) { whole = NO; break; }
+        [candidates addObject:bytes];
+        used[bytes.length] = YES;
     }
-    if (!names.count) return found;
+    if (complete) *complete = whole;
+    if (!candidates.count) return found;
     NSUInteger slots = 1;
-    while (slots < names.count * 4) slots <<= 1;
-    NSMutableData *table = [NSMutableData dataWithLength:slots * sizeof(uint32_t)];
-    uint32_t *index = table.mutableBytes;
-    for (NSUInteger i = 0; i < names.count; i++) {
-        uint32_t slot = IKProbeHash(names[i].bytes, names[i].length) & (uint32_t)(slots - 1);
-        while (index[slot]) slot = (slot + 1) & (uint32_t)(slots - 1);
+    while (slots < candidates.count * 4) slots <<= 1;
+    uint32_t mask = (uint32_t)(slots - 1);
+    uint32_t *index = calloc(slots, sizeof(uint32_t));
+    BOOL *hit = calloc(candidates.count, sizeof(BOOL));
+    if (!index || !hit) { free(index); free(hit); if (complete) *complete = NO; return found; }
+    for (NSUInteger i = 0; i < candidates.count; i++) {
+        uint32_t slot = IKProbeHash(candidates[i].bytes, candidates[i].length) & mask;
+        while (index[slot]) slot = (slot + 1) & mask;
         index[slot] = (uint32_t)i + 1;
     }
-    BOOL *hit = calloc(names.count, sizeof(BOOL));
-    double started = NSProcessInfo.processInfo.systemUptime;
     NSMutableSet<NSString *> *wanted = [NSMutableSet set];
-    for (NSArray<NSString *> *image in images) if ([image isKindOfClass:NSArray.class] && image.count == 2) [wanted addObject:IKProbePlainPath(image[0])];
-    uint32_t count = _dyld_image_count();
+    for (NSArray<NSString *> *image in images)
+        if ([image isKindOfClass:NSArray.class] && image.count == 2) [wanted addObject:IKProbePlainPath(image[0])];
+    double started = NSProcessInfo.processInfo.systemUptime;
     BOOL timedOut = NO;
+    uint32_t count = _dyld_image_count();
     for (uint32_t i = 0; i < count && !timedOut; i++) {
+        if (NSProcessInfo.processInfo.systemUptime - started > seconds) { timedOut = YES; break; }
         const char *path = _dyld_get_image_name(i);
         const struct mach_header *header = _dyld_get_image_header(i);
         if (!path || !header || header->magic != MH_MAGIC_64 || ![wanted containsObject:IKProbePlainPath(@(path))]) continue;
-        unsigned long size = 0;
+        unsigned long size = 0, checked = 0;
         const uint8_t *bytes = getsectiondata((const struct mach_header_64 *)header, "__TEXT", "__cstring", &size);
+        // A name counts only as a whole path component of a constant string: between the start or end of the
+        // string and '/'. "Library/Caches/KaraokeCache" confirms KaraokeCache; "KaraokeCacheOld" does not.
         for (unsigned long at = 0; bytes && at < size;) {
-            if ((at & 0xfffff) < 64 && NSProcessInfo.processInfo.systemUptime - started > seconds) { timedOut = YES; break; }
-            if (!IKProbeAlnum(bytes[at])) { at++; continue; }
+            if (at - checked >= 65536) {
+                checked = at;
+                if (NSProcessInfo.processInfo.systemUptime - started > seconds) { timedOut = YES; break; }
+            }
             unsigned long start = at;
-            while (at < size && IKProbeAlnum(bytes[at])) at++;
+            while (at < size && bytes[at] && bytes[at] != '/') at++;
             size_t length = at - start;
-            if (length > 63 || !(lengths & (1ull << length))) continue;
-            uint32_t slot = IKProbeHash(bytes + start, length) & (uint32_t)(slots - 1);
-            for (; index[slot]; slot = (slot + 1) & (uint32_t)(slots - 1)) {
-                NSData *name = names[index[slot] - 1];
+            at++;  // past the '/' or the terminating zero
+            if (!length || length > 64 || !used[length]) continue;
+            for (uint32_t slot = IKProbeHash(bytes + start, length) & mask; index[slot]; slot = (slot + 1) & mask) {
+                NSData *name = candidates[index[slot] - 1];
                 if (name.length == length && !memcmp(name.bytes, bytes + start, length)) { hit[index[slot] - 1] = YES; break; }
             }
         }
     }
-    for (NSUInteger i = 0; i < names.count; i++)
-        if (hit[i]) [found addObject:[[NSString alloc] initWithData:names[i] encoding:NSASCIIStringEncoding]];
+    for (NSUInteger i = 0; i < candidates.count; i++)
+        if (hit[i]) [found addObject:[[NSString alloc] initWithData:candidates[i] encoding:NSASCIIStringEncoding]];
+    free(index);
     free(hit);
-    if (complete) *complete = !timedOut;
+    if (complete) *complete = whole && !timedOut;
     return found;
 }
 
@@ -347,18 +355,20 @@ static void IKProbeSample(NSString *trigger) {
             // Directory names in this container that the report would hide, checked against the player's own strings.
             // The container is two levels above Library/IslandKit.
             NSURL *container = IKProbeDirectory.URLByDeletingLastPathComponent.URLByDeletingLastPathComponent;
+            // Only Library and tmp: iOS gives the user no way to create folders there, so their names come from the player.
             IKScanLimits walk = IKDefaultScanLimits();
             walk.entries = 20000;
             walk.seconds = 1.5;
-            NSMutableOrderedSet<NSString *> *runs = [NSMutableOrderedSet orderedSet];
-            for (NSString *name in IKContainerDirectoryNames(container, walk)) {
-                [runs addObjectsFromArray:IKMaskedRuns(name)];
-                if (runs.count >= 2000) break;
+            BOOL walked = NO, searched = NO, capped = NO;
+            NSMutableOrderedSet<NSString *> *candidates = [NSMutableOrderedSet orderedSet];
+            for (NSString *name in IKContainerDirectoryNames(container, walk, @[@"Library", @"tmp"], &walked)) {
+                if (!IKConfirmableName(name)) continue;
+                if (candidates.count >= 2000) { capped = YES; break; }
+                [candidates addObject:name];
             }
-            BOOL complete = YES;
-            [IKProbeNames unionSet:IKProbeConfirmNames(runs.array, images, 1.5, &complete)];
+            [IKProbeNames unionSet:IKProbeConfirmNames(candidates.array, images, 1.5, &searched)];
             NSDictionary *names = @{@"schema": @1, @"bundleID": IKProbeBundle, @"version": version, @"wall": @(NSDate.date.timeIntervalSince1970),
-                                    @"checked": @(runs.count), @"complete": @(complete),
+                                    @"checked": @(candidates.count), @"complete": @(walked && searched && !capped),
                                     @"names": [IKProbeNames.allObjects sortedArrayUsingSelector:@selector(compare:)]};
             [names writeToURL:[IKProbeDirectory URLByAppendingPathComponent:IKProbeNamesName] atomically:YES];
             // A sample that could not be saved keeps its unfinished mark, so it is retried once more at most.

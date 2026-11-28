@@ -123,19 +123,29 @@ static void testRedaction(void) {
         check([shown isEqual:segments[segment]], "path segment redaction");
     }
     check([IKRedactPathSegment([@"" stringByPaddingToLength:65 withString:@"a" startingAtIndex:0]) isEqual:@"<long>"], "very long segment");
-    NSSet *fixed = [NSSet setWithObjects:@"KaraokeCache", @"deadbeef1", @"2024", nil];
+    // A whole name can be confirmed only when its hidden part is joined to a known word of three letters or more.
+    for (NSString *name in @[@"KaraokeCache", @"karaoke_cache", @"TMEKaraokeData", @"user_johnsmith", @"KaraokeCache_123456", @"com.hackemist.SDImageCache",
+                             @"KaraokeCacheAbcdefghijklmnopqrstuvwxyzAbcdefghijklmnopqrstuvwxyz"])
+        check(IKConfirmableName(name), "compound names with a known word can be confirmed");
+    for (NSString *name in @[@"Yellow", @"JohnSmith", @"johnsmith", @"john_smith", @"QQJohn", @"Al_Green", @"Abbey Road", @"Shape of You", @"LyricCache",
+                             @"Caches", @"12345", @"周杰伦", @"john@example.com", @"a/b", @"<word>Cache", @"", (id)@7,
+                             @"KaraokeCacheAbcdefghijklmnopqrstuvwxyzAbcdefghijklmnopqrstuvwxyzA"])
+        check(!IKConfirmableName(name), "bare words, two unknown words, titles, visible names and non-names cannot");
+    NSSet *fixed = [NSSet setWithObjects:@"KaraokeCache", @"KaraokeCache_123456", @"JohnSmith", @"Yellow", nil];
     check([IKRedactPathSegmentKeeping(@"KaraokeCache", fixed) isEqual:@"KaraokeCache"] && [IKRedactPathSegment(@"KaraokeCache") isEqual:@"<word>Cache"] &&
-          [IKRedactPathSegmentKeeping(@"QQJohnCache", fixed) isEqual:@"QQ<word>Cache"] && [IKRedactPathSegmentKeeping(@"deadbeef1", fixed) isEqual:@"<hex>"] &&
-          [IKRedactPathSegmentKeeping(@"2024", fixed) isEqual:@"<num>"] && [IKRedactPathSegmentKeeping(@"KaraokeCache", nil) isEqual:@"<word>Cache"],
-          "a confirmed name is kept, numbers and IDs never are");
-    check([IKMaskedRuns(@"KaraokeCache") isEqual:@[@"KaraokeCache"]] && [IKMaskedRuns(@"com.example.johnsmith") isEqual:@[@"example", @"johnsmith"]] &&
-          [IKMaskedRuns(@"LyricCache") isEqual:@[]] && [IKMaskedRuns(@"1234") isEqual:@[]] && [IKMaskedRuns(@"周杰伦") isEqual:@[]] &&
-          [IKMaskedRuns(@"john@example.com") isEqual:@[]] && [IKMaskedRuns(@"QQJohnCache_v2") isEqual:@[@"QQJohnCache"]], "the runs that would be hidden");
-    NSDictionary *names = @{@"schema": @1, @"bundleID": @"com.tencent.QQMusic",
-                            @"names": @[@"KaraokeCache", @"bad name", @"歌词", @"12345", @7, @"", @"x/y"]};
+          [IKRedactPathSegmentKeeping(@"KaraokeCache_123456", fixed) isEqual:@"KaraokeCache_<num>"] &&
+          [IKRedactPathSegmentKeeping(@"KaraokeCacheOld", fixed) isEqual:@"<word>CacheOld"] &&
+          [IKRedactPathSegmentKeeping(@"JohnSmith", fixed) isEqual:@"<word>"] && [IKRedactPathSegmentKeeping(@"Yellow", fixed) isEqual:@"<word>"] &&
+          [IKRedactPathSegmentKeeping(@"KaraokeCache", nil) isEqual:@"<word>Cache"],
+          "only a whole confirmable name is kept, numbers stay hidden, and a listed bare word or person name is not shown");
+    NSDictionary *names = @{@"schema": @1, @"bundleID": @"com.tencent.QQMusic", @"version": @"13.5.0", @"wall": @1795780000, @"checked": @9, @"complete": @YES,
+                            @"names": @[@"KaraokeCache", @"JohnSmith", @"Yellow", @"bad name", @"歌词", @"12345", @7, @"", @"x/y"]};
     check([IKProbeConfirmedNames(names, @"com.tencent.qqmusic") isEqual:[NSSet setWithObject:@"KaraokeCache"]] &&
           !IKProbeConfirmedNames(names, @"com.netease.cloudmusic").count && !IKProbeConfirmedNames(@{@"schema": @2, @"names": @[@"A"]}, @"x").count &&
-          !IKProbeConfirmedNames(nil, @"com.tencent.QQMusic").count, "names read back are letters and digits for this app only");
+          !IKProbeConfirmedNames(nil, @"com.tencent.QQMusic").count, "names read back are re-checked, for this app only");
+    check([IKProbeNamesReport(names, @"com.tencent.QQMusic") isEqual:@"lyric probe names app=com.tencent.QQMusic version=13.5.0 captured=2026-11-27T11:46:40Z "
+                                                                         "checked=9 confirmed=1 complete=1"] &&
+          [IKProbeNamesReport(nil, @"com.netease.cloudmusic") isEqual:@"lyric probe names app=com.netease.cloudmusic absent"], "names line in the export");
     check([IKRedactPathSegment((id)@5) isEqual:@"<empty>"], "non-string segment");
     NSArray *files = @[@[@"123456.qrc", @"<num>.qrc", @"qrc"], @[@"晴天-周杰伦.lrc", @"<text>.lrc", @"lrc"],
                        @[@"Shape of You.lrc", @"<text>.lrc", @"lrc"], @[@"lyric_cache.db", @"lyric_cache.db", @"db"],
@@ -439,6 +449,7 @@ static void testEvents(NSURL *folder) {
 
 static double fakeNow;
 static double fakeClock(void) { return fakeNow += 0.5; }
+static double slowClock(void) { return fakeNow += 0.3; }
 
 static void put(NSURL *root, NSString *path, NSData *data) {
     NSURL *file = [root URLByAppendingPathComponent:path];
@@ -595,22 +606,48 @@ static void testContainer(NSURL *folder) {
 
     NSURL *named = [folder URLByAppendingPathComponent:@"Data/Application/named" isDirectory:YES];
     put(named, @"Library/Caches/KaraokeCache/lyric/9.lrc", timed);
+    put(named, @"Library/Caches/JohnSmith/lyric/3.lrc", timed);
+    put(named, @"Library/Caches/Yellow/lyric/4.lrc", timed);
+    put(named, @"Documents/KaraokeCache/lyric/2.lrc", timed);
     put(named, @"Documents/johnsmith/lyric/1.lrc", timed);
     put(named, @"Library/IslandKit/x.plist", plain);
     [fm createSymbolicLinkAtURL:[named URLByAppendingPathComponent:@"tmp/LinkedDir"] withDestinationURL:[named URLByAppendingPathComponent:@"Documents"] error:nil];
     report = IKContainerScanReport(named, @"com.tencent.QQMusic", IKDefaultScanLimits());
     check([report containsString:@"\n  Library/Caches/<word>Cache/lyric/<num>.lrc"] && [report containsString:@"confirmedNames=0"],
           "an unknown word stays hidden without confirmation");
-    report = IKContainerScanReportKeeping(named, @"com.tencent.QQMusic", IKDefaultScanLimits(), [NSSet setWithObject:@"KaraokeCache"]);
-    check([report containsString:@"\n  Library/Caches/KaraokeCache/lyric/<num>.lrc"] && [report containsString:@"\n  Documents/<word>/lyric/<num>.lrc"] &&
-          [report containsString:@"confirmedNames=1 "] && ![report containsString:@"johnsmith"], "a name confirmed in the player's binary is shown");
-    NSArray *directoryNames = IKContainerDirectoryNames(named, IKDefaultScanLimits());
-    check([directoryNames containsObject:@"KaraokeCache"] && [directoryNames containsObject:@"johnsmith"] && [directoryNames containsObject:@"Caches"] &&
+    // Even a names file that lists a person's name, a bare word or a Documents folder shows none of them (#140).
+    report = IKContainerScanReportKeeping(named, @"com.tencent.QQMusic", IKDefaultScanLimits(),
+                                          [NSSet setWithObjects:@"KaraokeCache", @"JohnSmith", @"Yellow", @"johnsmith", nil]);
+    check([report containsString:@"\n  Library/Caches/KaraokeCache/lyric/<num>.lrc"] && [report containsString:@"\n  Documents/<word>Cache/lyric/<num>.lrc"] &&
+          [report containsString:@"\n  Library/Caches/<word>/lyric/<num>.lrc ext=lrc files=2"] && [report containsString:@"\n  Documents/<word>/lyric/<num>.lrc"] &&
+          [report containsString:@"confirmedNames=1 "] && ![report containsString:@"John"] && ![report containsString:@"john"] &&
+          ![report containsString:@"Yellow"], "a confirmed name is shown only under Library or tmp and only when it is a compound name");
+    BOOL complete = NO;
+    NSArray *directoryNames = IKContainerDirectoryNames(named, IKDefaultScanLimits(), nil, &complete);
+    check(complete && [directoryNames containsObject:@"KaraokeCache"] && [directoryNames containsObject:@"johnsmith"] && [directoryNames containsObject:@"Caches"] &&
           ![directoryNames containsObject:@"IslandKit"] && ![directoryNames containsObject:@"LinkedDir"], "directory names for the probe");
+    directoryNames = IKContainerDirectoryNames(named, IKDefaultScanLimits(), @[@"Library", @"tmp"], &complete);
+    check(complete && [directoryNames containsObject:@"KaraokeCache"] && ![directoryNames containsObject:@"johnsmith"], "the probe walks only Library and tmp");
     IKScanLimits shallow = IKDefaultScanLimits();
     shallow.depth = 1;  // only Documents, Library and tmp are read; the names in them are seen, nothing below
-    check(![IKContainerDirectoryNames(named, shallow) containsObject:@"KaraokeCache"] && [IKContainerDirectoryNames(named, shallow) containsObject:@"Caches"],
-          "the walker keeps the depth limit");
+    directoryNames = IKContainerDirectoryNames(named, shallow, @[@"Library", @"tmp"], &complete);
+    check(![directoryNames containsObject:@"KaraokeCache"] && [directoryNames containsObject:@"Caches"] && !complete, "the walker keeps the depth limit");
+    shallow = IKDefaultScanLimits();
+    shallow.entries = 2;
+    check(IKContainerDirectoryNames(named, shallow, nil, &complete).count <= 2 && !complete, "the walker keeps the entry limit");
+    NSURL *wide = [folder URLByAppendingPathComponent:@"Data/Application/wide" isDirectory:YES];
+    for (int i = 0; i < 300; i++)
+        [fm createDirectoryAtURL:[wide URLByAppendingPathComponent:[NSString stringWithFormat:@"Library/d%d", i]] withIntermediateDirectories:YES attributes:nil error:nil];
+    shallow = IKDefaultScanLimits();
+    shallow.clock = slowClock;
+    shallow.seconds = 1.0;
+    fakeNow = 0;
+    directoryNames = IKContainerDirectoryNames(wide, shallow, @[@"Library"], &complete);
+    check(directoryNames.count < 300 && directoryNames.count >= 64 && !complete, "#140: the time limit holds inside one large directory");
+    NSURL *linkedRoot = [folder URLByAppendingPathComponent:@"Data/Application/linked-root"];
+    [fm createSymbolicLinkAtURL:linkedRoot withDestinationURL:named error:nil];
+    check(!IKContainerScanReport(linkedRoot, @"com.tencent.QQMusic", IKDefaultScanLimits()) &&
+          !IKContainerDirectoryNames(linkedRoot, IKDefaultScanLimits(), nil, &complete).count && !complete, "#140: a container root that is a link is refused");
 
     NSURL *empty = [folder URLByAppendingPathComponent:@"Data/Application/empty" isDirectory:YES];
     [fm createDirectoryAtURL:empty withIntermediateDirectories:YES attributes:nil error:nil];
@@ -692,12 +729,14 @@ static void testProbe(NSURL *folder, NSString *bundlePath) {
           !IKProbeBeginSampling(stuck, @"1.0", @"launch", &attempts) && attempts == 2 && !IKProbeBeginSampling(stuck, @"1.0", @"playback", NULL) &&
           IKProbeBeginSampling(stuck, @"1.1", @"launch", NULL), "an old single count applies to both triggers of its version");
 
-    // Directories the probe will find: one written in the fixture framework, one only the user could have named.
-    NSString *hidden = [@"Zed" stringByAppendingString:@"quist"];
-    [NSFileManager.defaultManager createDirectoryAtURL:[folder URLByAppendingPathComponent:@"Library/Caches/KaraokeCache"]
-                           withIntermediateDirectories:YES attributes:nil error:nil];
-    [NSFileManager.defaultManager createDirectoryAtURL:[[folder URLByAppendingPathComponent:@"Documents"] URLByAppendingPathComponent:hidden]
-                           withIntermediateDirectories:YES attributes:nil error:nil];
+    // Directories the probe will find. The fixture framework writes Library/Caches/KaraokeCache, the 64-character
+    // name below and Colors/Yellow. The others match no whole path component, or are not compound names, or are
+    // in Documents. The user-made name is assembled at run time so it is no constant of any image.
+    NSString *hidden = [[@"Zed" stringByAppendingString:@"quist"] stringByAppendingString:@"_cache"];
+    NSString *longest = @"KaraokeCacheAbcdefghijklmnopqrstuvwxyzAbcdefghijklmnopqrstuvwxyz";
+    for (NSString *path in @[@"Library/Caches/KaraokeCache", [@"Library/Caches/" stringByAppendingString:longest], [@"Library/Caches/" stringByAppendingString:hidden],
+                             @"Library/Caches/KaraokeCacheOld", @"Library/Caches/Yellow", @"Documents/KaraokeCache", @"Documents/KaraokeData"])
+        [NSFileManager.defaultManager createDirectoryAtURL:[folder URLByAppendingPathComponent:path] withIntermediateDirectories:YES attributes:nil error:nil];
     NSURL *namesFile = [directory URLByAppendingPathComponent:IKProbeNamesName];
 
     Class center = objc_getClass("MPNowPlayingInfoCenter");
@@ -710,18 +749,28 @@ static void testProbe(NSURL *folder, NSString *bundlePath) {
     NSDictionary *launch = IKReadEvidence(classes);
     check([launch[@"bundleID"] isEqual:@"com.tencent.QQMusic"] && [launch[@"classes"] count] == 0 && [launch[@"matched"] isEqual:@0],
           "the launch sample leaves out the library that carries the probe");
-    check(waitFor(^BOOL { return IKReadEvidence(namesFile) != nil; }) && [IKReadEvidence(namesFile)[@"checked"] unsignedIntegerValue] >= 2 &&
-          ![IKReadEvidence(namesFile)[@"names"] containsObject:@"KaraokeCache"], "before the framework loads, no name is confirmed");
+    check(waitFor(^BOOL { return IKReadEvidence(namesFile) != nil; }) && [IKReadEvidence(namesFile)[@"checked"] isEqual:@4] &&
+          [IKReadEvidence(namesFile)[@"names"] isEqual:@[]], "before the framework loads, no name is confirmed");
 
     NSString *framework = [bundlePath stringByAppendingPathComponent:@"Frameworks/FixtureLyrics.framework/FixtureLyrics"];
     void *handle = dlopen(framework.fileSystemRepresentation, RTLD_NOW);
     check(handle != NULL, "a framework inside the bundle loads after launch");
     BOOL (*touched)(void) = dlsym(handle, "FixtureLyricsTouched");
     BOOL complete = NO;
-    NSSet *confirmed = IKProbeConfirmNames(@[@"KaraokeCache", hidden, @"Zz9"], IKProbeAppImages(bundlePath, executableOf(bundlePath)), 2, &complete);
-    check([confirmed isEqual:[NSSet setWithObject:@"KaraokeCache"]] && complete, "only a whole run in the player's strings is confirmed");
-    check(!IKProbeConfirmNames(@[@"KaraokeCache"], @[], 2, NULL).count && !IKProbeConfirmNames(@[], IKProbeAppImages(bundlePath, nil), 2, NULL).count,
+    NSArray *frameworkOnly = IKProbeAppImages(bundlePath, executableOf(bundlePath));
+    NSSet *confirmed = IKProbeConfirmNames(@[@"KaraokeCache", longest, hidden, @"KaraokeCacheOld", @"Karaoke", @"karaoke_cache", @"Zz9"],
+                                           frameworkOnly, 2, &complete);
+    check([confirmed isEqual:[NSSet setWithObjects:@"KaraokeCache", longest, @"karaoke_cache", nil]] && complete,
+          "only a whole path component of the player's strings is confirmed, up to 64 characters");
+    check([IKProbeConfirmNames(@[@"Yellow"], frameworkOnly, 2, NULL) containsObject:@"Yellow"] && !IKConfirmableName(@"Yellow"),
+          "a bare word in the player's strings is found but can never be shown");
+    check(!IKProbeConfirmNames(@[@"KaraokeCache"], @[], 2, NULL).count && !IKProbeConfirmNames(@[], frameworkOnly, 2, NULL).count,
           "no images or no names, nothing confirmed");
+    check(!IKProbeConfirmNames(@[@"KaraokeCache"], frameworkOnly, 0, &complete).count && !complete, "#140: a search out of time is incomplete");
+    NSMutableArray *many = [NSMutableArray array];
+    for (int i = 0; i < 4100; i++) [many addObject:[NSString stringWithFormat:@"Cache%dName", i]];
+    IKProbeConfirmNames(many, frameworkOnly, 2, &complete);
+    check(!complete, "too many names are incomplete");
 
     MPNowPlayingInfoCenter *shared = MPNowPlayingInfoCenter.defaultCenter;
     // The player prepares the next track while paused: a title without a rate, then the same position, then rate 0.
@@ -765,8 +814,9 @@ static void testProbe(NSURL *folder, NSString *bundlePath) {
     for (NSString *row in late[@"ivars"]) if ([row isEqual:@"_sentences @\"NSArray\""]) ivar = YES;
     check(method && ivar && touched && !touched(), "its members are read without sending it a message");
     NSArray *confirmedNames = IKReadEvidence(namesFile)[@"names"];
-    check([confirmedNames containsObject:@"KaraokeCache"] && ![confirmedNames containsObject:hidden] && [IKReadEvidence(namesFile)[@"complete"] isEqual:@YES],
-          "the playback sample confirms the name the framework writes, not the user's");
+    check([confirmedNames isEqual:[@[@"KaraokeCache", longest] sortedArrayUsingSelector:@selector(compare:)]] &&
+          [IKReadEvidence(namesFile)[@"complete"] isEqual:@YES] && [IKReadEvidence(namesFile)[@"checked"] isEqual:@4],
+          "the playback sample confirms the names the framework writes, and nothing from Documents or the user");
     // The class file is written before the mark is cleared, so wait for the probe queue to finish.
     check(waitFor(^BOOL { return ![NSFileManager.defaultManager fileExistsAtPath:guard.path]; }), "no sampling mark is left");
     for (NSURL *file in @[classes, events])

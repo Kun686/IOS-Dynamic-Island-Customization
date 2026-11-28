@@ -89,8 +89,13 @@ static NSString *IKAdjacentFile(NSString *playerPath, NSString *name) {
 @property(nonatomic, strong) NSTimer *boundary;
 @property(nonatomic) NSUInteger generation;
 @property(nonatomic, strong) NSMutableDictionary<NSString *, IKLyricEventLog *> *eventLogs;
-@property(nonatomic) NSUInteger notedGeneration;
+// Dictionaries the HUD applied, in the order applied, each waiting for the app ID of its own refresh round.
+@property(nonatomic, strong) NSMutableArray<NSMutableDictionary *> *pendingRounds;
+@property(nonatomic) BOOL roundFlushScheduled;
 @end
+
+// How long an applied dictionary waits for its own round's app ID before it is dropped instead of guessed.
+static double IKRoundWait = 3;
 
 static void IKLyricsBridgeChanged(CFNotificationCenterRef center, void *observer, CFStringRef name,
                                   const void *object, CFDictionaryRef info) {
@@ -365,6 +370,50 @@ static NSDictionary *IKSnapshot(NSString *path) {
         [log writeTo:IKHUDEventsURL(bid)];
 }
 
+// Field-change evidence is recorded in the order the HUD applied the dictionaries, each credited to the app ID of
+// its own round. A round whose app ID has not arrived holds back the later ones, so a late reply neither loses
+// its event nor lands after a newer one.
+- (void)queueRound:(NSUInteger)gen info:(NSDictionary *)info seenAt:(double)seen app:(NSString *)bid known:(BOOL)known {
+    if (!self.pendingRounds) self.pendingRounds = [NSMutableArray array];
+    NSMutableDictionary *round = [@{@"gen": @(gen), @"info": info, @"seen": @(seen), @"queued": @(NSProcessInfo.processInfo.systemUptime)} mutableCopy];
+    if (known) round[@"app"] = bid ?: NSNull.null;
+    [self.pendingRounds addObject:round];
+    while (self.pendingRounds.count > 32) [self.pendingRounds removeObjectAtIndex:0];
+    [self flushRounds];
+}
+
+- (void)round:(NSUInteger)gen app:(NSString *)bid {
+    for (NSMutableDictionary *round in self.pendingRounds) {
+        if ([round[@"gen"] unsignedIntegerValue] != gen) continue;
+        round[@"app"] = bid ?: NSNull.null;
+        break;
+    }
+    [self flushRounds];
+}
+
+- (void)flushRounds {
+    double now = NSProcessInfo.processInfo.systemUptime;
+    while (self.pendingRounds.count) {
+        NSMutableDictionary *round = self.pendingRounds.firstObject;
+        if (!round[@"app"]) {
+            double waited = now - [round[@"queued"] doubleValue];
+            if (waited < IKRoundWait) {
+                if (!self.roundFlushScheduled) {
+                    self.roundFlushScheduled = YES;
+                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)((IKRoundWait - waited + 0.05) * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                        self.roundFlushScheduled = NO;
+                        [self flushRounds];
+                    });
+                }
+                return;
+            }
+        } else if (round[@"app"] != NSNull.null) {
+            [self noteDisplayFields:round[@"info"] app:round[@"app"] seenAt:[round[@"seen"] doubleValue]];
+        }
+        [self.pendingRounds removeObjectAtIndex:0];
+    }
+}
+
 - (void)applyInfo:(NSDictionary *)info playing:(BOOL)playing {
     NSDictionary *raw = IKSystemTrack(info);
     if (!raw && info.count && self.tracker.recording) raw = @{};
@@ -436,24 +485,14 @@ static NSDictionary *IKSnapshot(NSString *path) {
     __block NSDictionary *info;
     __block NSNumber *playing;
     // Timing evidence for the probe report: what the island was given and when. Only a dictionary this HUD applied
-    // counts, at the moment it arrived; a dictionary that arrives after a newer refresh started is dropped by the HUD
-    // and is not recorded either. It is credited once, to the app reported in the same round, even when that app ID
-    // arrives after the next refresh started. Rounds are recorded in order: an older one finishing late is dropped.
-    __block NSDictionary *seenInfo;
+    // counts, at the moment it arrived; one that arrives after a newer refresh started is dropped by the HUD and not
+    // recorded either. It is credited to this round's app ID, which may arrive later, also after newer rounds.
     __block NSString *roundApp;
-    __block BOOL appKnown = NO, noted = NO;
-    __block double seenAt = 0;
-    void (^note)(void) = ^{
-        if (noted || !appKnown || !seenInfo) return;
-        noted = YES;
-        if (gen <= self.notedGeneration) return;
-        self.notedGeneration = gen;
-        [self noteDisplayFields:seenInfo app:roundApp seenAt:seenAt];
-    };
+    __block BOOL appKnown = NO;
     MRMediaRemoteGetNowPlayingApplicationDisplayID(main, ^(NSString *bid) {
         roundApp = [bid isKindOfClass:NSString.class] ? bid : nil;
         appKnown = YES;
-        note();
+        [self round:gen app:roundApp];
         if (gen != self.generation) return;
         BOOL switched = self.mediaApplicationID && ![self.mediaApplicationID isEqual:bid];
         if (switched) [self clearPlayerScope];
@@ -471,9 +510,7 @@ static NSDictionary *IKSnapshot(NSString *path) {
         double arrived = NSProcessInfo.processInfo.systemUptime;
         if (gen != self.generation) return;
         NSDictionary *copy = [(__bridge NSDictionary *)result copy] ?: @{};
-        seenInfo = copy;
-        seenAt = arrived;
-        note();
+        [self queueRound:gen info:copy seenAt:arrived app:roundApp known:appKnown];
         info = copy;
         id rate = info[(__bridge NSString *)kMRMediaRemoteNowPlayingInfoPlaybackRate];
         [self applyInfo:info playing:playing ? playing.boolValue : (rate ? [rate doubleValue]>0 : self.isPlaying)];
@@ -558,7 +595,9 @@ static NSString *IKLyricEvidenceReport(NSString *bid) {
     if (unfinished) [parts addObject:unfinished];
     [parts addObject:IKLyricEventsReport(IKReadEvidence([directory URLByAppendingPathComponent:IKProbeEventsName]),
                                          IKReadEvidence(IKHUDEventsURL(bid)), bid)];
-    NSSet *fixed = IKProbeConfirmedNames(IKReadEvidence([directory URLByAppendingPathComponent:IKProbeNamesName]), bid);
+    NSDictionary *namesFile = IKReadEvidence([directory URLByAppendingPathComponent:IKProbeNamesName]);
+    [parts addObject:IKProbeNamesReport(namesFile, bid)];
+    NSSet *fixed = IKProbeConfirmedNames(namesFile, bid);
     NSString *scan = IKContainerScanReportKeeping(container, bid, IKDefaultScanLimits(), fixed);
     [parts addObject:scan ?: [NSString stringWithFormat:@"container scan app=%@ unreadable", bid]];
     return [parts componentsJoinedByString:@"\n"];

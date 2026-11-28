@@ -35,10 +35,11 @@ BOOL IKProbePlaybackStarted(NSArray<NSDictionary *> *recent);
 // Writes a class sample and clears this trigger's unfinished mark only when the file was written.
 BOOL IKProbeSaveSample(NSURL *directory, NSDictionary *packet, NSString *trigger);
 
-// Directory-name runs from `runs` that occur as a whole run of letters and digits in the __TEXT,__cstring section
-// of `images` (pairs from IKProbeAppImages). Such a name is written into the player itself, not chosen by the user.
-// Only membership is checked; nothing from the section is kept. `complete` is NO when `seconds` ran out.
-NSSet<NSString *> *IKProbeConfirmNames(NSArray<NSString *> *runs, NSArray<NSArray<NSString *> *> *images, double seconds, BOOL *complete);
+// Whole directory names from `names` (1 to 64 ASCII characters) that occur as a complete path component of a
+// constant string in the __TEXT,__cstring section of `images` (pairs from IKProbeAppImages): between the start or
+// end of the string and '/'. Such a name is written into the player, not chosen by the user. Only membership is
+// checked; nothing from the section is kept. `complete` is NO when `seconds` ran out or there were too many names.
+NSSet<NSString *> *IKProbeConfirmNames(NSArray<NSString *> *names, NSArray<NSArray<NSString *> *> *images, double seconds, BOOL *complete);
 
 // Starts the probe in this process: hooks the now-playing setter, samples classes `launchDelay` seconds from now and
 // `playbackDelay` seconds after playback is first published, and saves field-change events at most every `flushDelay` seconds.

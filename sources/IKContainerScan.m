@@ -38,27 +38,42 @@ static int IKScanOpen(int root, NSArray<NSData *> *components) {
     return current == root ? -1 : current;
 }
 
-NSArray<NSString *> *IKContainerDirectoryNames(NSURL *container, IKScanLimits limits) {
+// The container root itself must not be a symbolic link either. Directories above it may be (/var on iOS).
+static int IKScanOpenRoot(NSURL *container) {
+    return open(container.fileSystemRepresentation, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+}
+
+NSArray<NSString *> *IKContainerDirectoryNames(NSURL *container, IKScanLimits limits, NSArray<NSString *> *areas, BOOL *complete) {
+    if (complete) *complete = NO;
     NSMutableOrderedSet<NSString *> *names = [NSMutableOrderedSet orderedSet];
     if (!container.isFileURL) return @[];
     double (*clock)(void) = limits.clock ?: IKScanUptime;
     double started = clock();
-    int root = open(container.fileSystemRepresentation, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    int root = IKScanOpenRoot(container);
     if (root < 0) return @[];
     NSMutableArray<NSArray *> *queue = [NSMutableArray array];
-    for (NSString *name in @[@"Documents", @"Library", @"tmp"]) [queue addObject:@[@[IKScanName(name.UTF8String)], @1, name]];
-    NSUInteger entries = 0;
-    for (NSUInteger head = 0; head < queue.count && entries < limits.entries; head++) {
-        if (clock() - started > limits.seconds) break;
+    for (NSString *name in areas ?: @[@"Documents", @"Library", @"tmp"])
+        if ([@[@"Documents", @"Library", @"tmp"] containsObject:name]) [queue addObject:@[@[IKScanName(name.UTF8String)], @1, name]];
+    NSUInteger entries = 0, head = 0;
+    BOOL cut = NO;
+    for (; head < queue.count && !cut; head++) {
+        if (clock() - started > limits.seconds) { cut = YES; break; }
         NSArray<NSData *> *components = queue[head][0];
         NSUInteger level = [queue[head][1] unsignedIntegerValue];
         int fd = IKScanOpen(root, components);
+        int error = errno;
         DIR *stream = fd < 0 ? NULL : fdopendir(fd);
-        if (!stream) { if (fd >= 0) close(fd); continue; }
+        if (!stream) {
+            if (fd >= 0) close(fd);
+            if (level > 1 || error != ENOENT) cut = YES;  // a directory that could not be read leaves the list incomplete
+            continue;
+        }
         struct dirent *entry;
-        while ((entry = readdir(stream)) && entries < limits.entries) {
+        while ((entry = readdir(stream))) {
             if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
-            entries++;
+            if (entries >= limits.entries) { cut = YES; break; }
+            // The time is checked inside a directory too, so one huge directory cannot run past the limit.
+            if ((++entries & 63) == 0 && clock() - started > limits.seconds) { cut = YES; break; }
             unsigned char type = entry->d_type;
             if (type == DT_UNKNOWN) {
                 struct stat info;
@@ -70,10 +85,12 @@ NSArray<NSString *> *IKContainerDirectoryNames(NSURL *container, IKScanLimits li
             if (!name.length || (level == 1 && [queue[head][2] isEqual:@"Library"] && [name isEqual:@"IslandKit"])) continue;
             [names addObject:name];
             if (level + 1 <= limits.depth) [queue addObject:@[[components arrayByAddingObject:IKScanName(entry->d_name)], @(level + 1), name]];
+            else cut = YES;  // its contents were not looked at
         }
         closedir(stream);
     }
     close(root);
+    if (complete) *complete = !cut && head >= queue.count;
     return names.array;
 }
 
@@ -86,7 +103,7 @@ NSString *IKContainerScanReportKeeping(NSURL *container, NSString *bundle, IKSca
     NSMutableSet<NSString *> *confirmed = [NSMutableSet set];
     double (*clock)(void) = limits.clock ?: IKScanUptime;
     double started = clock();
-    int root = open(container.fileSystemRepresentation, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    int root = IKScanOpenRoot(container);
     if (root < 0) return nil;
 
     // Directories below a keyword-named directory are read before the rest, so a large unrelated cache cannot use up the limits first.
@@ -133,7 +150,9 @@ NSString *IKContainerScanReportKeeping(NSURL *container, NSString *bundle, IKSca
             if (type == DT_DIR) {
                 if (!name.length) { unreadable++; continue; }
                 if (level == 1 && [shown isEqual:@"Library"] && [name isEqual:@"IslandKit"]) continue;  // our own output
-                NSString *redacted = IKRedactPathSegment(name), *kept = fixed.count ? IKRedactPathSegmentKeeping(name, fixed) : redacted;
+                // Confirmed names apply only under Library and tmp, where iOS gives the user no way to create a folder.
+                BOOL appArea = [shown hasPrefix:@"Library"] || [shown hasPrefix:@"tmp"];
+                NSString *redacted = IKRedactPathSegment(name), *kept = fixed.count && appArea ? IKRedactPathSegmentKeeping(name, fixed) : redacted;
                 if (![kept isEqual:redacted]) [confirmed addObject:kept];
                 NSString *childShown = [NSString stringWithFormat:@"%@/%@", shown, kept];
                 if (keyword) [keywordDirectories addObject:childShown];

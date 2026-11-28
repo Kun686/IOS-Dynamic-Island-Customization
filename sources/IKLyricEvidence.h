@@ -36,14 +36,18 @@ NSString *IKRedactPathSegment(NSString *segment);
 NSString *IKRedactFileName(NSString *name, NSString **extension);
 // A path segment inside the app bundle (framework and executable names). Only numbers and IDs are replaced.
 NSString *IKRedactImageSegment(NSString *segment);
-// IKRedactPathSegment, but a run of letters and digits listed in `fixed` is kept as it is. Runs shaped like
-// numbers, hex, UUIDs or IDs are replaced regardless.
+// Whether a whole directory name may be shown once the probe found it written in the player: printable ASCII
+// without spaces, '/', '@', '<' or '>', at most 64 characters, partly hidden by IKRedactPathSegment, and with the
+// hidden part joined to a known word of three letters or more ("KaraokeCache", "karaoke_cache").
+BOOL IKConfirmableName(NSString *segment);
+// IKRedactPathSegment, but a whole name listed in `fixed` that is confirmable keeps its words. Numbers, hex,
+// UUIDs and IDs inside it are replaced regardless.
 NSString *IKRedactPathSegmentKeeping(NSString *segment, NSSet<NSString *> *fixed);
-// The runs of letters and digits in a directory name that IKRedactPathSegment turns into <word>.
-NSArray<NSString *> *IKMaskedRuns(NSString *segment);
-// Names from the probe's names file that may be shown: letters and digits only, at most 64, for this app.
+// Names from the probe's names file that may be shown: confirmable names for this app, at most 2000.
 // Empty for a missing, malformed or foreign file.
 NSSet<NSString *> *IKProbeConfirmedNames(NSDictionary *packet, NSString *bundle);
+// One line about the names file: how many names were checked and confirmed, and whether the check finished.
+NSString *IKProbeNamesReport(NSDictionary *packet, NSString *bundle);
 
 typedef struct {
     NSUInteger classes;  // classes listed with members
