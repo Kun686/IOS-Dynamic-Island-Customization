@@ -351,9 +351,13 @@ int main(int argc, const char *argv[]) { @autoreleasepool {
     check(IKCoverRows(CGSizeMake(358,78),38,76,NO).fits, "one-line lyric fits");
     CGRect single = IKCoverDisc(CGSizeMake(381,78),125,38), dual = IKCoverDisc(CGSizeMake(381,94),125,38);
     check(single.size.width == 38 && dual.size.width == 54, "cover grows with the single-to-double-row shell");
-    check(IKTextOrigin(128,40,0) == 0 && IKTextOrigin(128,40,1) == 44 && IKTextOrigin(128,40,2) == 88,
+    check(IKTextOrigin(128,40,0,NAN) == 0 && IKTextOrigin(128,40,1,NAN) == 44 && IKTextOrigin(128,40,2,NAN) == 88,
           "left center and right move the track shared by base and fill");
-    check(IKTextOrigin(100,180,1) == 0 && IKTextOrigin(100,180,2) == 0, "overflow starts at the first glyph for every alignment");
+    check(IKTextOrigin(100,180,1,NAN) == 0 && IKTextOrigin(100,180,2,NAN) == 0 && IKTextOrigin(100,180,3,50) == 0,
+          "overflow starts at the first glyph for every alignment");
+    // 居中、自定义按胶囊中线换算来的 anchor 摆放，挡住时停在行的边上
+    check(IKTextOrigin(128,40,1,50) == 30 && IKTextOrigin(128,40,3,10) == 0 && IKTextOrigin(128,40,3,200) == 88,
+          "visual center follows the shell midline and stops at the row edges");
     for (int step = 0; step <= 60; step++) {
         CGFloat f = step / 60.0;
         CGSize shell = CGSizeMake(119 + 262*f, 31 + 63*f);

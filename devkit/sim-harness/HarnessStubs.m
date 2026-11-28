@@ -58,6 +58,9 @@ NSString *const IKMusicDidChangeNotification = @"IKMusicDidChangeNotification";
 
 BOOL IsHUDEnabled(void) { return YES; }
 void SetHUDEnabled(BOOL isEnabled) {}
+// 模拟器里设置页和“悬浮进程”是同一个用户，数据目录本来就可写
+BOOL IKRepairDataDirectory(void) { return YES; }
+BOOL IKEnsureDataDirectoryWritable(void) { return YES; }
 
 static NSDictionary *gOverrides;
 static UIView *gSystemLayer;   // 放模拟系统岛的那一层，在岛的容器下面
@@ -178,12 +181,55 @@ static void HarnessReload(IKPrefs *self, SEL _cmd) {
     return !row.hidden && !content.hidden && (content.layer.presentationLayer ?: content.layer).opacity > 0.5;
 }
 
++ (NSString *)coverageProblemForSystemRect:(CGRect)sys {
+    IKIslandView *v = [[IKController shared] valueForKey:@"island"];
+    CALayer *shell = v.layer.presentationLayer ?: v.layer;
+    if (v.hidden || shell.opacity < 0.5) return nil;
+    CGRect f = shell.frame;
+    if (CGRectGetMinX(f) > CGRectGetMinX(sys) + 0.5 || CGRectGetMaxX(f) < CGRectGetMaxX(sys) - 0.5 ||
+        CGRectGetMinY(f) > CGRectGetMinY(sys) + 0.5 || CGRectGetMaxY(f) < CGRectGetMaxY(sys) - 0.5)
+        return [NSString stringWithFormat:@"shell %@ exposes system %@", NSStringFromCGRect(f), NSStringFromCGRect(sys)];
+    return nil;
+}
+
++ (NSString *)ringProblem {
+    IKIslandView *v = [[IKController shared] valueForKey:@"island"];
+    UIView *ring = [v valueForKey:@"ring"];
+    CALayer *shell = v.layer.presentationLayer ?: v.layer;
+    CALayer *r = ring.layer.presentationLayer ?: ring.layer;
+    CGSize s = shell.bounds.size, rs = r.bounds.size;
+    if (fabs(rs.width - (s.width - 1)) > 0.6 || fabs(rs.height - (s.height - 1)) > 0.6 ||
+        fabs(r.cornerRadius - MAX(0, shell.cornerRadius - 0.5)) > 0.6)
+        return [NSString stringWithFormat:@"ring %.1fx%.1f r%.1f vs shell %.1fx%.1f r%.1f",
+                rs.width, rs.height, r.cornerRadius, s.width, s.height, shell.cornerRadius];
+    return nil;
+}
+
++ (double)ringOpacity {
+    IKIslandView *v = [[IKController shared] valueForKey:@"island"];
+    UIView *holder = [v valueForKey:@"ringHolder"], *box = [v valueForKey:@"ringBox"];
+    CALayer *h = holder.layer.presentationLayer ?: holder.layer, *b = box.layer.presentationLayer ?: box.layer;
+    CALayer *shell = v.layer.presentationLayer ?: v.layer;
+    return h.opacity * b.opacity * shell.opacity;
+}
+
++ (double)firstRowCenterOffset {
+    IKIslandView *v = [[IKController shared] valueForKey:@"island"];
+    UIView *row = [v valueForKey:@"row1"];
+    UIView *track = [row valueForKey:@"track"];
+    CGRect t = [track convertRect:track.bounds toView:v];
+    return CGRectGetMidX(t) - v.bounds.size.width / 2;
+}
+
 + (NSString *)describeIsland {
     IKIslandView *v = [[IKController shared] valueForKey:@"island"];
     CALayer *pl = v.layer.presentationLayer ?: v.layer;
     double ca = [v respondsToSelector:NSSelectorFromString(@"contentAlpha")] ? [[v valueForKey:@"contentAlpha"] doubleValue] : -1;
-    return [NSString stringWithFormat:@"state=%ld shown=%@ frame=%@ pres=%@ alpha=%.2f contentAlpha=%.2f",
+    UIView *content = [v valueForKey:@"content"];
+    CALayer *cp = content.layer.presentationLayer ?: content.layer;
+    return [NSString stringWithFormat:@"state=%ld shown=%@ frame=%@ pres=%@ alpha=%.2f contentAlpha=%.2f shownContent=%.2f following=%@ drawn=%@",
             (long)v.state, [[IKController shared] valueForKey:@"shownState"], NSStringFromCGRect(v.frame),
-            NSStringFromCGRect(pl.frame), v.alpha, ca];
+            NSStringFromCGRect(pl.frame), v.alpha, ca, cp.opacity, [v valueForKey:@"resizingShell"],
+            NSStringFromCGSize([[v valueForKey:@"drawnSize"] CGSizeValue])];
 }
 @end

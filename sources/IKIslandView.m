@@ -179,6 +179,8 @@ typedef NS_ENUM(NSInteger, IKLineChange) {
 @property (nonatomic, strong) UIColor *textColor;
 @property (nonatomic, strong) UIColor *highlightColor;   // nil：这一行没有高亮层
 @property (nonatomic) BOOL truncates;                    // YES：过长时截断并加省略号，不滚动
+// 居中和自定义时文字中心想放的位置（本行坐标），由岛按胶囊中线换算；NAN 表示按本行自己的宽度居中
+@property (nonatomic) CGFloat anchor;
 @property (nonatomic, copy, readonly) NSString *text;
 - (void)setText:(NSString *)text change:(IKLineChange)change;
 // duration > 0：这一行在 duration 秒内唱完。fill 为 YES 时高亮从左到右铺开，过长的文字跟着进度向左滚动。
@@ -212,6 +214,7 @@ typedef NS_ENUM(NSInteger, IKLineChange) {
     if ((self = [super initWithFrame:frame])) {
         self.clipsToBounds = YES;
         self.userInteractionEnabled = NO;
+        _anchor = NAN;
         _text = @"";
         _font = [UIFont systemFontOfSize:16 weight:UIFontWeightBold];
         _textColor = [UIColor whiteColor];
@@ -267,6 +270,12 @@ typedef NS_ENUM(NSInteger, IKLineChange) {
 - (void)setAlignment:(NSInteger)alignment {
     if (_alignment == alignment) return;
     _alignment = alignment;
+    [self setNeedsLayout];
+}
+
+- (void)setAnchor:(CGFloat)anchor {
+    if ((isnan(anchor) && isnan(_anchor)) || fabs(anchor - _anchor) < 0.25) return;
+    _anchor = anchor;
     [self setNeedsLayout];
 }
 
@@ -331,7 +340,7 @@ typedef NS_ENUM(NSInteger, IKLineChange) {
     // Use center and bounds because the track may have an independent scrolling transform.
     void (^place)(void) = ^{
         self.track.bounds = CGRectMake(0, 0, lw, H);
-        self.track.center = CGPointMake(IKTextOrigin(W, lw, self.alignment) + lw / 2, H / 2);
+        self.track.center = CGPointMake(IKTextOrigin(W, lw, self.alignment, self.anchor) + lw / 2, H / 2);
         self.baseLabel.frame = self.track.bounds;
         self.topLabel.frame = self.track.bounds;
     };
@@ -459,6 +468,57 @@ typedef NS_ENUM(NSInteger, IKLineChange) {
 
 @end
 
+#pragma mark - 进度环的遮罩
+
+// 以中心为顶点的扇形，从 12 点方向顺时针张开。尺寸固定得很大（远大于胶囊），
+// 所以胶囊变形时它只需要把中心对准环的中心：中心跟着同一个弹簧动画平移，扇形本身不用变
+@interface IKWedgeView : UIView
+@end
+
+@implementation IKWedgeView
++ (Class)layerClass { return [CAShapeLayer class]; }
+@end
+
+static const CGFloat IKWedgeSide = 2400;
+static const NSInteger IKWedgeSteps = 48;
+
+// 圆角矩形（宽 w、高 h、圆角 r）的边上，从顶部中点顺时针走过全长 p 倍的那个点，
+// 相对矩形中心的角度（弧度，12 点方向为 -π/2，顺时针增大，取值 [-π/2, 3π/2]）
+CGFloat IKRingAngle(CGFloat w, CGFloat h, CGFloat r, CGFloat p) {
+    w = MAX(w, 1); h = MAX(h, 1);
+    r = MAX(0, MIN(r, MIN(w, h) / 2));
+    p = MAX(0, MIN(1, p));
+    CGFloat a = w / 2 - r, b = h - 2 * r, c = w - 2 * r, q = M_PI_2 * r;
+    CGFloat lengths[9] = { a, q, b, q, c, q, b, q, a };
+    CGFloat total = 0;
+    for (int i = 0; i < 9; i++) total += lengths[i];
+    CGFloat s = p * total, x = w / 2, y = 0;
+    for (int i = 0; i < 9; i++) {
+        CGFloat len = lengths[i];
+        CGFloat t = (i == 8 || s <= len) ? (len > 0 ? MIN(1, s / len) : 1) : -1;
+        if (t < 0) { s -= len; continue; }
+        CGFloat ang;
+        switch (i) {
+            case 0: x = w / 2 + a * t; y = 0; break;
+            case 1: ang = -M_PI_2 + M_PI_2 * t; x = w - r + r * cos(ang); y = r + r * sin(ang); break;
+            case 2: x = w; y = r + b * t; break;
+            case 3: ang = M_PI_2 * t; x = w - r + r * cos(ang); y = h - r + r * sin(ang); break;
+            case 4: x = w - r - c * t; y = h; break;
+            case 5: ang = M_PI_2 + M_PI_2 * t; x = r + r * cos(ang); y = h - r + r * sin(ang); break;
+            case 6: x = 0; y = h - r - b * t; break;
+            case 7: ang = M_PI + M_PI_2 * t; x = r + r * cos(ang); y = r + r * sin(ang); break;
+            default: x = r + a * t; y = 0; break;
+        }
+        break;
+    }
+    if (p >= 1) return M_PI * 1.5;
+    CGFloat angle = atan2(y - h / 2, x - w / 2);
+    if (angle < -M_PI_2 - 1e-6) angle += 2 * M_PI;
+    // 走到最后一小段（回到 12 点左侧）时 atan2 会接近 -π/2，按整圈处理
+    if (p > 0.5 && angle < 0 && x <= w / 2) angle += 2 * M_PI;
+    return MAX(-M_PI_2, MIN(M_PI * 1.5, angle));
+}
+
 #pragma mark - 岛
 
 typedef NS_ENUM(NSInteger, IKTextKind) {
@@ -480,8 +540,17 @@ typedef NS_ENUM(NSInteger, IKTextKind) {
 @property (nonatomic, strong) CADisplayLink *sizeLink;
 @property (nonatomic) BOOL resizingShell;
 @property (nonatomic) CGSize drawnSize;
-@property (nonatomic, strong) CAShapeLayer *ringTrack;
-@property (nonatomic, strong) CAShapeLayer *ring;
+@property (nonatomic) CGSize drawnFit;                 // 形变期间按它判断内容放不放得下（变小时比 drawnSize 小）
+// 进度环。不放在 content 里：content 在形变时逐帧排版，会比胶囊慢一帧；
+// 环用视图的描边画，尺寸和圆角在同一个动画块里设置，跟胶囊用同一条弹簧曲线，形变时不用藏起来。
+//   ringHolder 透明度跟随 contentAlpha（收进开孔时一起淡出），ringBox 透明度表示开没开进度环
+@property (nonatomic, strong) UIView *ringHolder;
+@property (nonatomic, strong) UIView *ringBox;
+@property (nonatomic, strong) UIView *ringTrack;
+@property (nonatomic, strong) UIView *ring;
+@property (nonatomic, strong) IKWedgeView *ringWedge;
+@property (nonatomic) CGSize wedgeSize;                 // 遮罩扇形是按多大的胶囊算的
+@property (nonatomic, weak) UIView *fadingSnapshot;
 @end
 
 @implementation IKIslandView
@@ -497,6 +566,25 @@ typedef NS_ENUM(NSInteger, IKTextKind) {
         _lyricEffect = 1;
         _lyricFontSize = 16;
         _contentAlpha = 1;
+
+        _ringHolder = [[UIView alloc] initWithFrame:self.bounds];
+        _ringHolder.userInteractionEnabled = NO;
+        _ringBox = [[UIView alloc] initWithFrame:self.bounds];
+        _ringBox.alpha = 0;
+        [_ringHolder addSubview:_ringBox];
+        _ringTrack = [UIView new];
+        _ring = [UIView new];
+        for (UIView *v in @[_ringTrack, _ring]) {
+            v.layer.borderWidth = 2;
+            v.layer.cornerCurve = kCACornerCurveContinuous;
+            [_ringBox addSubview:v];
+        }
+        _ringTrack.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.14].CGColor;
+        _ringWedge = [[IKWedgeView alloc] initWithFrame:CGRectMake(0, 0, IKWedgeSide, IKWedgeSide)];
+        _ringWedge.userInteractionEnabled = NO;
+        ((CAShapeLayer *)_ringWedge.layer).fillColor = [UIColor blackColor].CGColor;
+        _ring.maskView = _ringWedge;
+        [self addSubview:_ringHolder];
 
         _content = [[UIView alloc] initWithFrame:self.bounds];
         _content.userInteractionEnabled = NO;
@@ -519,21 +607,8 @@ typedef NS_ENUM(NSInteger, IKTextKind) {
         _row2 = [IKLineView new];
         for (UIView *v in @[_cover, _barsView, _iconView, _appLabel, _row1, _row2]) [_content addSubview:v];
         [self applyFonts];
-
-        _ringTrack = [CAShapeLayer layer];
-        _ringTrack.fillColor = [UIColor clearColor].CGColor;
-        _ringTrack.strokeColor = [UIColor colorWithWhite:1 alpha:0.14].CGColor;
-        _ringTrack.lineWidth = 2;
-        _ring = [CAShapeLayer layer];
-        _ring.fillColor = [UIColor clearColor].CGColor;
-        _ring.lineWidth = 2;
-        _ring.lineCap = kCALineCapRound;
-        _ring.strokeEnd = 0;
-        _ringTrack.hidden = YES;
-        _ring.hidden = YES;
-        [_content.layer insertSublayer:_ringTrack atIndex:0];
-        [_content.layer insertSublayer:_ring above:_ringTrack];
         self.accent = [UIColor whiteColor];
+        [self applyWedgeAnimated:NO];
     }
     return self;
 }
@@ -575,7 +650,7 @@ typedef NS_ENUM(NSInteger, IKTextKind) {
     self.row2.highlightColor = h2;
     self.row2.truncates = truncates;
     self.appLabel.textColor = self.notifTitleColor ?: [UIColor colorWithWhite:1 alpha:0.66];
-    self.ring.strokeColor = (self.ringColor ?: self.accent).CGColor;
+    self.ring.layer.borderColor = (self.ringColor ?: self.accent).CGColor;
 }
 
 - (void)applyFonts {
@@ -602,6 +677,7 @@ typedef NS_ENUM(NSInteger, IKTextKind) {
 }
 
 - (void)setCoversCutout:(BOOL)coversCutout {
+    if (_coversCutout != coversCutout) self.wedgeSize = CGSizeZero; // 圆角变了，扇形要重算
     _coversCutout = coversCutout;
     [self setNeedsLayout];
 }
@@ -623,11 +699,25 @@ typedef NS_ENUM(NSInteger, IKTextKind) {
     if (_lyricAlignment == lyricAlignment) return;
     _lyricAlignment = lyricAlignment;
     [self applyTextStyles];
+    [self setNeedsLayout];
+}
+
+- (void)setLyricOffsetX:(CGFloat)lyricOffsetX {
+    if (fabs(_lyricOffsetX - lyricOffsetX) < 0.01) return;
+    _lyricOffsetX = lyricOffsetX;
+    [self setNeedsLayout];
+}
+
+- (void)setLyricOffsetY:(CGFloat)lyricOffsetY {
+    if (fabs(_lyricOffsetY - lyricOffsetY) < 0.01) return;
+    _lyricOffsetY = lyricOffsetY;
+    [self setNeedsLayout];
 }
 
 - (void)setContentAlpha:(CGFloat)contentAlpha {
     _contentAlpha = contentAlpha;
     self.content.alpha = contentAlpha;
+    self.ringHolder.alpha = contentAlpha;
 }
 
 - (void)setOutlineOnly:(BOOL)outlineOnly {
@@ -642,11 +732,54 @@ typedef NS_ENUM(NSInteger, IKTextKind) {
     [self endFollowingShell];
     [self.layer removeAllAnimations];
     [self.content.layer removeAllAnimations];
+    [self.fadingSnapshot removeFromSuperview];
+    [self removeRingAnimationsKeepingFades:NO];
+}
+
+- (void)stopShellAnimations {
+    [self.layer removeAllAnimations];
+    [self removeRingAnimationsKeepingFades:YES];
+}
+
+// 环的几个视图和胶囊一起做形变动画。胶囊的动画被拿掉时它们的也要一起拿掉，否则会和胶囊错开
+- (void)removeRingAnimationsKeepingFades:(BOOL)keepFades {
+    for (UIView *v in @[self.ringHolder, self.ringBox, self.ringTrack, self.ring, self.ringWedge]) {
+        for (NSString *key in [v.layer.animationKeys copy]) {
+            if (keepFades && [key isEqualToString:@"opacity"]) continue;
+            if ([key isEqualToString:@"ik.progress"]) continue;
+            [v.layer removeAnimationForKey:key];
+        }
+    }
 }
 
 - (void)hideContentImmediately {
     [self.content.layer removeAllAnimations];
+    [self.ringHolder.layer removeAnimationForKey:@"opacity"];
     [UIView performWithoutAnimation:^{ self.contentAlpha = 0; }];
+}
+
+// 换一类内容（音乐 ↔ 通知）时：旧内容留一张快照淡出，真正的内容先隐去，再由过渡把新内容淡入。
+// 进度环不在 content 里，不受影响，由 showsProgress 自己淡入淡出
+- (void)crossfadeContent {
+    [self.fadingSnapshot removeFromSuperview];
+    UIView *snap = nil;
+    if (self.window && !self.hidden && self.alpha > 0.01 && self.content.alpha > 0.01)
+        snap = [self.content snapshotViewAfterScreenUpdates:NO];
+    [self.content.layer removeAllAnimations];
+    [UIView performWithoutAnimation:^{ self.content.alpha = 0; }];
+    _contentAlpha = 0;
+    if (!snap) return;
+    snap.frame = self.content.frame;
+    snap.userInteractionEnabled = NO;
+    // 胶囊左右对称地变宽变窄：快照跟着中线走，不贴着左边
+    snap.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin | UIViewAutoresizingFlexibleRightMargin
+        | UIViewAutoresizingFlexibleBottomMargin;
+    [self insertSubview:snap aboveSubview:self.content];
+    self.fadingSnapshot = snap;
+    [UIView animateWithDuration:0.18 delay:0
+                        options:UIViewAnimationOptionCurveEaseOut | UIViewAnimationOptionAllowUserInteraction
+                     animations:^{ snap.alpha = 0; }
+                     completion:^(BOOL finished) { [snap removeFromSuperview]; }];
 }
 
 - (void)playInteractionPulse {
@@ -709,44 +842,83 @@ typedef NS_ENUM(NSInteger, IKTextKind) {
     [self.barsView setAnimating:on];
 }
 
+// 开关进度环时淡入淡出，不再一下子出现或消失（形变期间也照常显示，见 ringHolder 的说明）
 - (void)setShowsProgress:(BOOL)showsProgress {
+    if (_showsProgress == showsProgress) return;
     _showsProgress = showsProgress;
-    [CATransaction begin];
-    [CATransaction setDisableActions:YES];
-    self.ring.hidden = !showsProgress || self.resizingShell;
-    self.ringTrack.hidden = self.ring.hidden;
-    [CATransaction commit];
+    CGFloat alpha = showsProgress ? 1 : 0;
+    if (!self.window) {
+        [self.ringBox.layer removeAnimationForKey:@"opacity"];
+        self.ringBox.alpha = alpha;
+        return;
+    }
+    [UIView animateWithDuration:0.22 delay:0
+                        options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction
+                     animations:^{ self.ringBox.alpha = alpha; } completion:nil];
 }
 
 - (void)setProgress:(CGFloat)progress {
-    _progress = MAX(0, MIN(1, progress));
-    self.ring.strokeEnd = _progress; // 独立图层自带隐式动画，变化是平滑的
+    CGFloat p = MAX(0, MIN(1, progress));
+    BOOL small = fabs(p - _progress) < 0.05;
+    _progress = p;
+    [self applyWedgeAnimated:(small && !self.resizingShell && self.window != nil)];
 }
 
-// 从顶部中点出发、顺时针绕胶囊一圈的路径
-- (void)layoutRingWithCornerRadius:(CGFloat)cr size:(CGSize)size {
-    CGFloat W = size.width, H = size.height, i = 1.5;
-    CGFloat x0 = i, y0 = i, x1 = W - i, y1 = H - i;
-    CGFloat r = MAX(0, MIN(cr - i, MIN((y1 - y0) / 2, (x1 - x0) / 2)));
-    UIBezierPath *p = [UIBezierPath bezierPath];
-    [p moveToPoint:CGPointMake(W / 2, y0)];
-    [p addLineToPoint:CGPointMake(x1 - r, y0)];
-    [p addArcWithCenter:CGPointMake(x1 - r, y0 + r) radius:r startAngle:-M_PI_2 endAngle:0 clockwise:YES];
-    [p addLineToPoint:CGPointMake(x1, y1 - r)];
-    [p addArcWithCenter:CGPointMake(x1 - r, y1 - r) radius:r startAngle:0 endAngle:M_PI_2 clockwise:YES];
-    [p addLineToPoint:CGPointMake(x0 + r, y1)];
-    [p addArcWithCenter:CGPointMake(x0 + r, y1 - r) radius:r startAngle:M_PI_2 endAngle:M_PI clockwise:YES];
-    [p addLineToPoint:CGPointMake(x0, y0 + r)];
-    [p addArcWithCenter:CGPointMake(x0 + r, y0 + r) radius:r startAngle:M_PI endAngle:M_PI * 1.5 clockwise:YES];
-    [p addLineToPoint:CGPointMake(W / 2, y0)];
+static CGFloat IKShellRadius(CGSize size, BOOL coversCutout) {
+    return MAX(0, MIN(size.height / 2, coversCutout ? 36 : 29));
+}
 
+// 按此刻看得见的胶囊尺寸，把遮罩扇形张到 progress 对应的角度。
+// 形变期间每一帧都按看得见的尺寸重算一次：扇形只决定进度走到哪里，晚一帧看不出来
+- (void)applyWedgeAnimated:(BOOL)animated {
+    CGSize size = (self.resizingShell && self.sizeLink) ? self.drawnSize : self.bounds.size;
+    self.wedgeSize = size;
+    CGFloat w = MAX(1, size.width - 1), h = MAX(1, size.height - 1);
+    CGFloat r = MAX(0, IKShellRadius(size, self.coversCutout) - 0.5);
+    // 描边宽 2，按描边中线算角度
+    CGFloat end = IKRingAngle(w - 2, h - 2, MAX(0, r - 1), self.progress);
+    CGFloat c = IKWedgeSide / 2, R = IKWedgeSide / 2;
+    CGMutablePathRef path = CGPathCreateMutable();
+    CGPathMoveToPoint(path, NULL, c, c);
+    for (NSInteger i = 0; i <= IKWedgeSteps; i++) {
+        CGFloat a = -M_PI_2 + (end + M_PI_2) * i / IKWedgeSteps;
+        CGPathAddLineToPoint(path, NULL, c + R * cos(a), c + R * sin(a));
+    }
+    CGPathCloseSubpath(path);
+    CAShapeLayer *shape = (CAShapeLayer *)self.ringWedge.layer;
+    if (animated && shape.path) {
+        CABasicAnimation *a = [CABasicAnimation animationWithKeyPath:@"path"];
+        CAShapeLayer *shown = (CAShapeLayer *)shape.presentationLayer;
+        a.fromValue = (__bridge id)((shown && shown.path) ? shown.path : shape.path);
+        a.toValue = (__bridge id)path;
+        a.duration = 0.25;
+        a.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionLinear];
+        [shape addAnimation:a forKey:@"ik.progress"];
+    } else {
+        [shape removeAnimationForKey:@"ik.progress"];
+    }
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
-    self.ring.frame = (CGRect){CGPointZero,size};
-    self.ringTrack.frame = self.ring.frame;
-    self.ring.path = p.CGPath;
-    self.ringTrack.path = p.CGPath;
+    shape.path = path;
     [CATransaction commit];
+    CGPathRelease(path);
+}
+
+// 环和胶囊外形：在 layoutSubviews 里、不包 performWithoutAnimation 地设置，
+// 胶囊在动画块里改尺寸时，它们就和胶囊用同一个弹簧，一帧不差
+- (void)layoutShell {
+    CGSize size = self.bounds.size;
+    CGFloat radius = IKShellRadius(size, self.coversCutout);
+    self.layer.cornerRadius = radius;
+    CGRect bounds = (CGRect){CGPointZero, size};
+    self.ringHolder.frame = bounds;
+    self.ringBox.frame = bounds;
+    CGRect ringRect = CGRectInset(bounds, 0.5, 0.5);
+    for (UIView *v in @[self.ringTrack, self.ring]) {
+        v.frame = ringRect;
+        v.layer.cornerRadius = MAX(0, radius - 0.5);
+    }
+    self.ringWedge.center = CGPointMake(ringRect.size.width / 2, ringRect.size.height / 2);
 }
 
 - (void)playNotifEntrance {
@@ -771,8 +943,8 @@ typedef NS_ENUM(NSInteger, IKTextKind) {
     if (self.resizingShell) return;
     self.resizingShell = YES;
     self.drawnSize = (self.layer.presentationLayer ?: self.layer).bounds.size;
+    self.drawnFit = self.drawnSize;
     self.sizeLink = [CADisplayLink displayLinkWithTarget:self selector:@selector(followShell:)];
-    [self setShowsProgress:self.showsProgress];
     [self.sizeLink addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
     [self setNeedsLayout];
 }
@@ -782,28 +954,51 @@ typedef NS_ENUM(NSInteger, IKTextKind) {
     [self.sizeLink invalidate];
     self.sizeLink = nil;
     [UIView performWithoutAnimation:^{ [self layoutContentForSize:self.bounds.size]; }];
-    [self setShowsProgress:self.showsProgress];
+    [self refreshWedgeIfSizeChanged];
     [self setNeedsLayout];
 }
 
 - (void)followShell:(CADisplayLink *)link {
     CALayer *visible = self.layer.presentationLayer;
     if (!visible || CGSizeEqualToSize(visible.bounds.size,self.drawnSize)) return;
-    self.drawnSize = visible.bounds.size;
-    [UIView performWithoutAnimation:^{ [self layoutContentForSize:self.drawnSize]; }];
+    CGSize now = visible.bounds.size, before = self.drawnSize;
+    self.drawnSize = now;
+    // 这里排好的内容要到下一帧才显示，那时胶囊又变了一点。变小的方向往前多看两帧判断放不放得下
+    // （收起用的是先慢后快的曲线，只看一帧不够），免得最后一行文字被胶囊底边切掉；
+    // 变大的方向仍按此刻的尺寸，宁可晚一帧出现
+    CGSize fit = CGSizeMake(MIN(now.width, now.width + 2 * (now.width - before.width)),
+                            MIN(now.height, now.height + 2 * (now.height - before.height)));
+    self.drawnFit = fit;
+    [UIView performWithoutAnimation:^{ [self layoutContentForSize:now fitSize:fit]; }];
+    [self refreshWedgeIfSizeChanged];
+}
+
+- (void)refreshWedgeIfSizeChanged {
+    CGSize size = (self.resizingShell && self.sizeLink) ? self.drawnSize : self.bounds.size;
+    if (CGSizeEqualToSize(size, self.wedgeSize)) return;
+    self.wedgeSize = size;
+    [self applyWedgeAnimated:NO];
 }
 
 - (void)layoutSubviews {
     [super layoutSubviews];
+    // 外形和环跟着当前的动画走；内容按此刻看得见的尺寸排，不做动画
+    [self layoutShell];
     CGSize size = self.resizingShell ? (self.sizeLink ? self.drawnSize : CGSizeZero) : self.bounds.size;
-    [UIView performWithoutAnimation:^{ [self layoutContentForSize:size]; }];
+    // 形变期间的其他布局（属性变化触发的）沿用逐帧算出的“放不放得下”，不要把刚藏起来的内容又放出来
+    CGSize fit = (self.resizingShell && self.sizeLink) ? self.drawnFit : size;
+    [UIView performWithoutAnimation:^{ [self layoutContentForSize:size fitSize:fit]; }];
+    [self refreshWedgeIfSizeChanged];
 }
 
 - (void)layoutContentForSize:(CGSize)size {
+    [self layoutContentForSize:size fitSize:size];
+}
+
+// size 决定各元素摆在哪里；fit 决定放不放得下（形变时可能比 size 小一点，见 followShell:）
+- (void)layoutContentForSize:(CGSize)size fitSize:(CGSize)fit {
     CGFloat W = size.width, H = size.height;
     self.content.frame = (CGRect){CGPointZero,size};
-    CGFloat radius = MIN(H / 2, self.coversCutout ? 36 : 29);
-    self.layer.cornerRadius = radius;
 
     BOOL compact = (self.state == IKStateMusicCompact);
     BOOL lyric   = (self.state == IKStateLyric);
@@ -813,17 +1008,18 @@ typedef NS_ENUM(NSInteger, IKTextKind) {
     CGFloat bandHeight = self.cutoutBand > 0 ? self.cutoutBand : 37;
     CGRect disc = IKCoverDisc(size, self.cutoutWidth, bandHeight);
     IKCoverTextLayout rows = IKCoverRows(size, bandHeight, notif ? 70 : CGRectGetMaxX(disc) + 12, two);
+    CGRect fitDisc = IKCoverDisc(fit, self.cutoutWidth, bandHeight);
+    IKCoverTextLayout fitRows = IKCoverRows(fit, bandHeight, notif ? 70 : CGRectGetMaxX(fitDisc) + 12, two);
     CGFloat side = MAX(0,(W-self.cutoutWidth)/2);
-    BOOL decorFits = !self.coversCutout || side >= 32;
-    BOOL textFits = self.coversCutout ? rows.fits : (W >= (notif ? 200 : 104) && H >= (two ? 42 : 24));
-    self.cover.hidden    = !(compact || lyric) || !decorFits || (self.coversCutout && lyric && disc.size.width < 22);
+    BOOL decorFits = !self.coversCutout || MAX(0, (fit.width - self.cutoutWidth) / 2) >= 32;
+    BOOL textFits = self.coversCutout ? fitRows.fits
+        : (fit.width >= (notif ? 200 : 104) && fit.height >= (two ? 42 : 24));
+    self.cover.hidden    = !(compact || lyric) || !decorFits || (self.coversCutout && lyric && fitDisc.size.width < 22);
     self.barsView.hidden = !(compact || lyric) || !decorFits;
     self.iconView.hidden = !notif || !decorFits;
     self.appLabel.hidden = !notif || !decorFits;
     self.row1.hidden     = !(lyric || notif) || !textFits;
     self.row2.hidden     = !two || !textFits;
-
-    if (!self.resizingShell) [self layoutRingWithCornerRadius:radius size:size];
 
     if (!self.coversCutout) {
         // 独立胶囊：左边封面或图标，中间文字，右边音柱
@@ -868,8 +1064,33 @@ typedef NS_ENUM(NSInteger, IKTextKind) {
             self.row2.frame = rows.second;
         }
     }
+    [self placeTextForSize:size lyric:lyric two:two band:bandHeight];
     self.iconView.layer.cornerRadius = self.iconRound ? self.iconView.bounds.size.width / 2 : 11;
     [self.content layoutIfNeeded];
+}
+
+// 歌词态的文字位置。居中和自定义都以整个胶囊的中线（= 屏幕中线）为基准，
+// 而不是封面右边剩下那块文字区域的中间；自定义再加上左右、上下偏移。
+// 文字只在自己那一行里移动，所以不会压到封面、音柱或胶囊边缘，到边就停住
+- (void)placeTextForSize:(CGSize)size lyric:(BOOL)lyric two:(BOOL)two band:(CGFloat)band {
+    if (!lyric) {
+        self.row1.anchor = NAN;
+        self.row2.anchor = NAN;
+        return;
+    }
+    BOOL custom = (self.lyricAlignment == 3);
+    if (custom && fabs(self.lyricOffsetY) > 0.01) {
+        CGRect used = two ? CGRectUnion(self.row1.frame, self.row2.frame) : self.row1.frame;
+        // 覆盖模式下不能往上移进开孔那一条
+        CGFloat top = self.coversCutout ? band + 1 : 3, bottom = size.height - 3;
+        CGFloat dy = MIN(bottom - CGRectGetMaxY(used), self.lyricOffsetY);
+        dy = MAX(top - CGRectGetMinY(used), dy);
+        self.row1.frame = CGRectOffset(self.row1.frame, 0, dy);
+        if (two) self.row2.frame = CGRectOffset(self.row2.frame, 0, dy);
+    }
+    CGFloat mid = size.width / 2 + (custom ? self.lyricOffsetX : 0);
+    self.row1.anchor = mid - CGRectGetMinX(self.row1.frame);
+    self.row2.anchor = mid - CGRectGetMinX(self.row2.frame);
 }
 
 @end

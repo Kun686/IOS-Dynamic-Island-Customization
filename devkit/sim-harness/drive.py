@@ -12,8 +12,10 @@ os.makedirs(outdir, exist_ok=True)
 env = dict(os.environ)
 for k, v in json.loads(envjson).items():
     env['SIMCTL_CHILD_' + k] = str(v)
+simset = os.environ.get('IK_SIM_SET')  # 可选：simctl --set 的设备目录，模拟器数据就不放在用户目录里
 def sim(*a, **kw):
-    return subprocess.run(['xcrun', 'simctl', *a], env=env, capture_output=True, text=True, **kw)
+    pre = ['--set', simset] if simset else []
+    return subprocess.run(['xcrun', 'simctl', *pre, *a], env=env, capture_output=True, text=True, **kw)
 sim('terminate', udid, 'com.ikharness.app')
 logpath = os.path.abspath(os.path.join(outdir, name + '.log'))
 r = sim('launch', '--stdout=' + logpath, '--stderr=' + logpath, udid, 'com.ikharness.app')

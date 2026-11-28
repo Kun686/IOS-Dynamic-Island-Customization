@@ -1,4 +1,5 @@
 import SwiftUI
+import PhotosUI
 import UniformTypeIdentifiers
 
 // 供 Objective-C 的主程序调用：整个 App 的界面
@@ -196,6 +197,45 @@ struct NotifyView: View {
     @State private var choosingAvatar = false
     @State private var savingAvatar = false
     @State private var avatarStatus = ""
+    @State private var photoItem: PhotosPickerItem?
+    @State private var avatarPreview: UIImage?
+
+    // 头像目录归悬浮进程（root）所有时，先以 root 身份把它改回 mobile 可写，再写图片。
+    // 都放在后台线程：修目录要等一个子进程，缩图和写文件也不该卡住界面
+    private static func writeAvatar(_ work: @escaping () -> String?) async -> String? {
+        await Task.detached { () -> String? in
+            let writable = IKEnsureDataDirectoryWritable()
+            guard let failure = work() else { return nil }
+            return writable ? failure
+                : failure + "。数据目录 /var/mobile/Library/IslandKit 仍不可写，请在首页把运行开关关掉再打开后重试。"
+        }.value
+    }
+
+    private func finishAvatarSave(_ message: String?) {
+        savingAvatar = false
+        avatarStatus = message ?? "已为所选会话保存头像"
+        refreshAvatarPreview()
+    }
+
+    private func removeAvatar() {
+        let title = avatarTitle
+        savingAvatar = true
+        Task {
+            let message = await NotifyView.writeAvatar { IKLocalAvatar.shared().setImage(nil, for: title) }
+            savingAvatar = false
+            avatarStatus = message ?? "已移除绑定"
+            refreshAvatarPreview()
+        }
+    }
+
+    // 当前输入的会话已经绑定了图片时显示一个小预览
+    private func refreshAvatarPreview() {
+        if let url = IKLocalAvatar.shared().image(forTitle: avatarTitle) {
+            avatarPreview = UIImage(contentsOfFile: url.path)
+        } else {
+            avatarPreview = nil
+        }
+    }
 
     private var shown: [AppInfo] {
         query.isEmpty ? apps : apps.filter { $0.name.localizedCaseInsensitiveContains(query) }
@@ -239,19 +279,57 @@ struct NotifyView: View {
                         Caption("系统没有提供头像时，用通知标题匹配本地图片。同名会话会共用这张头像。")
                         TextField("微信通知中显示的会话标题", text: $avatarTitle)
                             .textFieldStyle(.roundedBorder)
-                            .onChange(of: avatarTitle) { _ in avatarStatus = "" }
-                        HStack {
-                            Button("选择图片") {
+                            .onChange(of: avatarTitle) { _ in
+                                avatarStatus = ""
+                                refreshAvatarPreview()
+                            }
+                        HStack(spacing: 16) {
+                            PhotosPicker(selection: $photoItem, matching: .images) {
+                                Text("从相册选择")
+                            }
+                            Button("从文件选择") {
                                 selectedAvatarTitle = avatarTitle
                                 choosingAvatar = true
                             }
-                            Spacer()
-                            Button("移除绑定") {
-                                avatarStatus = IKLocalAvatar.shared().setImage(nil, for: avatarTitle) ?? "已移除绑定"
+                            Spacer(minLength: 0)
+                            Button("移除绑定") { removeAvatar() }
+                        }
+                        .font(.system(size: 15, weight: .medium))
+                        .frame(minHeight: 44)
+                        .disabled(avatarTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || savingAvatar)
+                        if let preview = avatarPreview {
+                            HStack(spacing: 10) {
+                                Image(uiImage: preview).resizable().scaledToFill()
+                                    .frame(width: 40, height: 40)
+                                    .clipShape(Circle())
+                                    .accessibilityHidden(true)
+                                Caption("这个会话已绑定头像，下一条通知起生效。")
                             }
-                        }.disabled(avatarTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || savingAvatar)
+                        }
+                        if savingAvatar { ProgressView() }
                         if !avatarStatus.isEmpty { Caption(avatarStatus) }
-                    }.padding(.top, 8)
+                    }
+                    .padding(.top, 8)
+                    .onAppear { refreshAvatarPreview() }
+                }
+            }
+            .onChange(of: photoItem) { item in
+                guard let item = item else { return }
+                photoItem = nil
+                let title = avatarTitle
+                savingAvatar = true
+                Task {
+                    var message: String?
+                    do {
+                        if let data = try await item.loadTransferable(type: Data.self) {
+                            message = await NotifyView.writeAvatar { IKLocalAvatar.shared().setImageData(data, for: title) }
+                        } else {
+                            message = "没有读到所选照片的数据"
+                        }
+                    } catch {
+                        message = "读取照片失败：\(error.localizedDescription)"
+                    }
+                    finishAvatarSave(message)
                 }
             }
             .fileImporter(isPresented: $choosingAvatar, allowedContentTypes: [.image]) { result in
@@ -260,13 +338,12 @@ struct NotifyView: View {
                     let title = selectedAvatarTitle
                     savingAvatar = true
                     Task {
-                        let message = await Task.detached {
+                        let message = await NotifyView.writeAvatar {
                             let scoped = url.startAccessingSecurityScopedResource()
                             defer { if scoped { url.stopAccessingSecurityScopedResource() } }
                             return IKLocalAvatar.shared().setImage(url, for: title)
-                        }.value
-                        savingAvatar = false
-                        avatarStatus = message ?? "已为所选会话保存头像"
+                        }
+                        finishAvatarSave(message)
                     }
                 } catch {
                     if (error as NSError).code != NSUserCancelledError { avatarStatus = error.localizedDescription }
@@ -320,20 +397,23 @@ struct NotifyView: View {
 
 // MARK: - 歌词
 
-private struct PlaybackReportDocument: FileDocument {
-    static let readableContentTypes: [UTType] = [.plainText]
-    var text: String
+// 播放诊断导出的位置：和 island.log、notif.log 在同一个目录，用 Filza 等文件管理器能直接取到
+private let IKPlaybackReportPath = "/var/mobile/Library/IslandKit/playback-report.txt"
 
-    init(text: String) { self.text = text }
-    init(configuration: ReadConfiguration) throws {
-        guard let data = configuration.file.regularFileContents, let text = String(data: data, encoding: .utf8) else {
-            throw CocoaError(.fileReadInapplicableStringEncoding)
-        }
-        self.text = text
+// 从最上层的界面弹出系统分享面板。分享的是文字本身，不是文件：
+// 这个无沙盒的巨魔 App 写不进系统给的临时目录，文件导出面板（fileExporter）会因此失败
+@MainActor private func IKPresentShareSheet(text: String) {
+    let windows = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.flatMap { $0.windows }
+    var window: UIWindow? = windows.first(where: { $0.isKeyWindow }) ?? windows.first
+    if window == nil, let fallback = UIApplication.shared.delegate?.window { window = fallback }
+    guard var top = window?.rootViewController else { return }
+    while let next = top.presentedViewController, !next.isBeingDismissed { top = next }
+    let sheet = UIActivityViewController(activityItems: [text], applicationActivities: nil)
+    if let popover = sheet.popoverPresentationController {
+        popover.sourceView = top.view
+        popover.sourceRect = CGRect(x: top.view.bounds.midX, y: top.view.bounds.midY, width: 1, height: 1)
     }
-    func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {
-        FileWrapper(regularFileWithContents: Data(text.utf8))
-    }
+    top.present(sheet, animated: true)
 }
 
 @available(iOS 16.0, *)
@@ -344,9 +424,38 @@ struct LyricView: View {
     @State private var lyricStatus = ""
     @State private var queryingTrack = false
     @State private var exportingReport = false
-    @State private var reportDocument: PlaybackReportDocument?
     @State private var selectingSamples = false
     @State private var sampleReport: String?
+
+    // 生成诊断文本 → 写到数据目录 → 复制到剪贴板 → 弹出分享面板。
+    // 写文件失败时照样复制和分享，状态行写明没保存成的原因
+    private func exportReport() {
+        let sample = sampleReport
+        exportingReport = true
+        Task {
+            let (text, failure) = await Task.detached { () -> (String, String?) in
+                let history = IKMusicCenter.playbackDiagnosticReport()
+                let text = [history, sample].compactMap { $0 }.joined(separator: "\n")
+                guard IKEnsureDataDirectoryWritable() else {
+                    return (text, "数据目录 /var/mobile/Library/IslandKit 不可写，请在首页把运行开关关掉再打开后重试")
+                }
+                do {
+                    try text.write(toFile: IKPlaybackReportPath, atomically: true, encoding: .utf8)
+                    return (text, nil)
+                } catch {
+                    return (text, error.localizedDescription)
+                }
+            }.value
+            exportingReport = false
+            UIPasteboard.general.string = text
+            if let failure = failure {
+                lyricStatus = "诊断已复制到剪贴板，但没能保存成文件：\(failure)"
+            } else {
+                lyricStatus = "诊断已保存到 \(IKPlaybackReportPath)，并已复制到剪贴板。"
+            }
+            IKPresentShareSheet(text: text)
+        }
+    }
 
     private func currentTrack(_ action: @escaping ([AnyHashable: Any]) -> Void) {
         queryingTrack = true
@@ -389,29 +498,25 @@ struct LyricView: View {
                 }
                     .disabled(queryingTrack)
                 Caption(lyricStatus.isEmpty ? "支持带时间标签的 LRC 和明文 QRC、YRC。" : lyricStatus)
-                Button("导出播放诊断") {
-                    let sample = sampleReport
-                    Task {
-                        let history = await Task.detached { IKMusicCenter.playbackDiagnosticReport() }.value
-                        let parts = [history, sample].compactMap { $0 }
-                        reportDocument = PlaybackReportDocument(text: parts.joined(separator: "\n"))
-                        exportingReport = true
-                    }
-                }
-                .fileExporter(isPresented: $exportingReport, document: reportDocument, contentType: .plainText,
-                              defaultFilename: "IslandKit-播放诊断") { result in
-                    if case .failure(let error) = result, (error as NSError).code != NSUserCancelledError {
-                        lyricStatus = error.localizedDescription
-                    }
-                }
+                Button(exportingReport ? "正在导出…" : "导出播放诊断") { exportReport() }
+                    .disabled(exportingReport)
                 Button("检查已导出的歌词样本文件夹") {
                     selectingSamples = true
                     choosingLyrics = true
                 }.disabled(queryingTrack)
                 if target["mode"] as? String == "已绑定本地时间轴" {
                     Button("移除这首歌的绑定") {
-                        lyricStatus = IKMusicCenter.removeImport(for: target) ?? "已移除本地时间轴"
-                        target["mode"] = nil
+                        let selectedTrack = target
+                        queryingTrack = true
+                        Task {
+                            let message: String? = await Task.detached {
+                                _ = IKEnsureDataDirectoryWritable()
+                                return IKMusicCenter.removeImport(for: selectedTrack)
+                            }.value
+                            queryingTrack = false
+                            lyricStatus = message ?? "已移除本地时间轴"
+                            if message == nil { target["mode"] = nil }
+                        }
                     }.disabled(queryingTrack)
                 }
             }
@@ -420,8 +525,22 @@ struct LyricView: View {
                 Caption("行数")
                 Segmented(value: $store.s.lyricLines, options: [(1, "单行"), (2, "双行")], accent: accent)
                 Caption("单行只显示当前这句歌词；双行第一行显示歌名，第二行显示当前歌词。")
-                Caption("文字对齐")
-                Segmented(value: $store.s.lyricAlignment, options: [(0, "靠左"), (1, "居中"), (2, "靠右")], accent: accent)
+                Caption("文字位置")
+                Segmented(value: $store.s.lyricAlignment,
+                          options: [(0, "靠左"), (1, "居中"), (2, "靠右"), (3, "自定义")], accent: accent)
+                if store.s.lyricAlignment == 3 {
+                    SliderRow(title: "左右位置（0 为胶囊正中，正数向右）", value: $store.s.lyricOffsetX, range: -100...100, step: 1)
+                    SliderRow(title: "上下位置（正数向下）", value: $store.s.lyricOffsetY, range: -10...10, step: 0.5, format: "%.1f")
+                    Button("回到正中") {
+                        store.s.lyricOffsetX = 0
+                        store.s.lyricOffsetY = 0
+                    }
+                    .font(.system(size: 15, weight: .medium))
+                    .frame(minHeight: 44)
+                }
+                Caption(store.s.lyricAlignment == 3
+                        ? "悬浮窗运行且正在放歌时，拖动滑块会直接在屏幕顶部看到效果。文字不会压到封面、音柱和胶囊边缘，到边后就停住。"
+                        : "居中按整个胶囊的中线对齐，和屏幕中线一致；左边的封面挡住时会往右让开。比胶囊宽的歌词总是从第一个字开始滚动。")
             }
 
             Card {
@@ -449,7 +568,10 @@ struct LyricView: View {
                     let message: String? = await Task.detached {
                         let scoped = url.startAccessingSecurityScopedResource()
                         defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-                        return inspecting ? IKMusicCenter.sampleReport(at: url) : IKMusicCenter.importLyrics(at: url, target: selectedTrack)
+                        if inspecting { return IKMusicCenter.sampleReport(at: url) }
+                        // 时间轴写在数据目录的 Timelines 里，目录归 root 时先改回 mobile 可写
+                        _ = IKEnsureDataDirectoryWritable()
+                        return IKMusicCenter.importLyrics(at: url, target: selectedTrack)
                     }.value
                     queryingTrack = false
                     if inspecting {

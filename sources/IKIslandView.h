@@ -7,6 +7,10 @@ typedef NS_ENUM(NSInteger, IKState) {
     IKStateNotif,
 };
 
+// 圆角矩形（宽 w、高 h、圆角 r）的边上，从顶部中点顺时针走过全长 p 倍的那个点相对中心的角度，
+// 12 点方向为 -π/2，顺时针增大，取值 [-π/2, 3π/2]。进度环的遮罩按它张开
+FOUNDATION_EXTERN CGFloat IKRingAngle(CGFloat w, CGFloat h, CGFloat r, CGFloat p);
+
 // 圆形封面，可匀速旋转、暂停和继续
 @interface IKCoverView : UIView
 @property (nonatomic, strong) UIImage *image;
@@ -18,7 +22,9 @@ typedef NS_ENUM(NSInteger, IKState) {
 @interface IKIslandView : UIView
 @property (nonatomic) IKState state;
 @property (nonatomic) NSInteger lyricLines;
-@property (nonatomic) NSInteger lyricAlignment;
+@property (nonatomic) NSInteger lyricAlignment;   // 0 左、1 中（按整个胶囊的中线）、2 右、3 自定义
+@property (nonatomic) CGFloat lyricOffsetX;       // 自定义：文字中心相对胶囊中线的偏移，正数向右
+@property (nonatomic) CGFloat lyricOffsetY;       // 自定义：上下偏移，正数向下
 @property (nonatomic) CGFloat cutoutWidth;
 // 覆盖模式下，开孔下沿在本视图坐标里的位置；文字要放到它下面
 @property (nonatomic) CGFloat cutoutBand;
@@ -49,7 +55,8 @@ typedef NS_ENUM(NSInteger, IKState) {
 - (void)setNotifIcon:(UIImage *)icon appName:(NSString *)app round:(BOOL)round;
 - (void)setBarsAnimating:(BOOL)on;
 
-// 播放进度环：沿胶囊边缘从顶部中点顺时针走，走满一圈表示这首歌播完
+// 播放进度环：沿胶囊边缘从顶部中点顺时针走，走满一圈表示这首歌播完。
+// 胶囊形变时环跟着胶囊一起变（同一个动画），开关时淡入淡出
 @property (nonatomic) BOOL showsProgress;
 @property (nonatomic) CGFloat progress; // 0...1
 
@@ -62,9 +69,13 @@ typedef NS_ENUM(NSInteger, IKState) {
 @property (nonatomic) BOOL outlineOnly;
 // 停掉胶囊和内容层上还在跑的形变、透明度动画（不影响歌词填色和封面旋转）
 - (void)stopAnimations;
+// 只停胶囊外形（和跟着它的进度环）的形变动画，透明度渐变照常走完
+- (void)stopShellAnimations;
 - (void)beginFollowingShell;
 - (void)endFollowingShell;
 - (void)hideContentImmediately;
+// 换一类内容（音乐 ↔ 通知）前调用：旧内容留一张快照淡出，真正的内容先隐去，等过渡把新内容淡入
+- (void)crossfadeContent;
 // 点击或长按后给一个轻微回弹，确认交互已经被悬浮进程收到。
 - (void)playInteractionPulse;
 @end

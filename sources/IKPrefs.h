@@ -24,7 +24,9 @@
 @property (nonatomic) BOOL spinEnabled;
 @property (nonatomic) BOOL pauseStopsSpin;
 @property (nonatomic) NSInteger lyricLines;      // 1 或 2
-@property (nonatomic) NSInteger lyricAlignment;  // 0 左、1 中、2 右
+@property (nonatomic) NSInteger lyricAlignment;  // 0 左、1 中（按整个胶囊的中线）、2 右、3 自定义
+@property (nonatomic) CGFloat lyricOffsetX;      // 自定义：文字中心相对胶囊中线的左右偏移，正数向右
+@property (nonatomic) CGFloat lyricOffsetY;      // 自定义：上下偏移，正数向下
 @property (nonatomic) BOOL defaultCompact;
 @property (nonatomic) double spinSeconds;        // 转一圈用时
 @property (nonatomic) double notifDuration;      // 通知停留秒数

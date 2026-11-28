@@ -8,6 +8,7 @@
 #import <objc/runtime.h>
 
 #import "HUDMainApplicationDelegate.h"
+#import "HUDHelper.h"
 #import "HUDMainWindow.h"
 #import "HUDRootViewController.h"
 #import "IKPrefs.h"
@@ -48,6 +49,13 @@ static void IKWindowPrefsChanged(CFNotificationCenterRef center, void *observer,
 - (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary <UIApplicationLaunchOptionsKey, id> *)launchOptions
 {
     log_debug(OS_LOG_DEFAULT, "- [HUDMainApplicationDelegate application:%{public}@ didFinishLaunchingWithOptions:%{public}@]", application, launchOptions);
+
+    // 悬浮进程是 root，之前建的数据目录归 root，设置 App 写不进去。启动时改回 mobile，
+    // 这样设置 App 保存备用头像、歌词时间轴和诊断报告时不必再提权
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        BOOL repaired = IKRepairDataDirectory();
+        [IKPrefs log:[NSString stringWithFormat:@"dataDirectory repaired=%d uid=%d", repaired, getuid()]];
+    });
 
     _rootViewController = [[HUDRootViewController alloc] init];
 

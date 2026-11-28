@@ -4,6 +4,7 @@
 #import "IKMusicCenter.h"
 #import "IKLocalAvatar.h"
 #import <ImageIO/ImageIO.h>
+#include <sys/stat.h>
 
 static NSString *store, *bundle;
 static NSDictionary *metadata;
@@ -275,6 +276,20 @@ int main(int argc, const char **argv) { @autoreleasepool {
     check([avatars setImage:file forTitle:@"测试会话"] && [avatars imageForTitle:@"测试会话"], "invalid replacement preserves selected photo");
     check([avatars setImage:picture forTitle:@"微信"] != nil, "generic hidden notification title cannot receive a shared photo");
     check(![avatars setImage:nil forTitle:@"测试会话"] && ![avatars imageForTitle:@"测试会话"], "removing binding restores automatic fallback");
+    NSData *pictureData = [NSData dataWithContentsOfURL:picture];
+    check(pictureData && ![avatars setImageData:pictureData forTitle:@"相册会话"] && [avatars imageForTitle:@"相册会话"],
+          "photo library data is stored as a bound avatar");
+    check([avatars setImageData:[@"not an image" dataUsingEncoding:NSUTF8StringEncoding] forTitle:@"相册会话"] != nil &&
+          [avatars imageForTitle:@"相册会话"], "undecodable photo data keeps the previous avatar");
+    check([avatars setImageData:[NSData data] forTitle:@"相册会话"] != nil, "empty photo data is rejected");
+    NSString *lockedRoot = [store stringByAppendingPathComponent:@"locked"];
+    [NSFileManager.defaultManager createDirectoryAtPath:lockedRoot withIntermediateDirectories:YES attributes:nil error:nil];
+    chmod(lockedRoot.fileSystemRepresentation, 0555);
+    IKLocalAvatar *locked = [[IKLocalAvatar alloc] initWithDirectory:[NSURL fileURLWithPath:[lockedRoot stringByAppendingPathComponent:@"WeChatAvatars"]]];
+    NSString *lockedMessage = [locked setImageData:pictureData forTitle:@"相册会话"];
+    check([lockedMessage containsString:@"无法创建目录"] && [lockedMessage containsString:@"WeChatAvatars"],
+          "an unwritable data directory names the failing step and path");
+    chmod(lockedRoot.fileSystemRepresentation, 0755);
     if (![NSFileManager.defaultManager removeItemAtPath:store error:nil]) return 2;
     printf("HUD and settings: %d checks passed\n",count);
     return 0;

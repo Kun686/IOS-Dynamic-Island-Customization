@@ -20,7 +20,8 @@ final class HarnessAppDelegate: UIResponder, UIApplicationDelegate {
             w.makeKeyAndVisible()
             var o: [String: Any] = [:]
             for key in ["placement", "transitionStyle", "lyricLines", "lyricEffect", "titleColorMode", "lyricColorMode",
-                        "coverExtraWidth", "coverExtraHeight", "coverOffsetY", "coverCompactSide", "calibrateUntil"] {
+                        "coverExtraWidth", "coverExtraHeight", "coverOffsetY", "coverCompactSide", "calibrateUntil",
+                        "lyricAlignment", "lyricOffsetX", "lyricOffsetY"] {
                 if let v = env["IK_" + key], let d = Double(v) { o[key] = d }
             }
             if let c = env["IK_titleColor"] { o["titleColor"] = UIColor(Color(hex: c)) }
@@ -80,8 +81,13 @@ final class HarnessAppDelegate: UIResponder, UIApplicationDelegate {
         if env["IK_TL"] == "interrupt" {
             let ctl = IKController.shared()!
             var clipped = 0
-            let sampler = Timer.scheduledTimer(withTimeInterval: 1.0/60, repeats: true) { _ in
-                if !HarnessHUD.expandedContentFitsPresentation() { clipped += 1 }
+            let t0 = CACurrentMediaTime()
+            let sampler = Timer.scheduledTimer(withTimeInterval: 1.0/60, repeats: true) { [weak self] _ in
+                if !HarnessHUD.expandedContentFitsPresentation() {
+                    clipped += 1
+                    self?.log(String(format: "clipped at t=%.3f | %@ | %@", CACurrentMediaTime() - t0,
+                                     HarnessHUD.describeIsland(), HarnessHUD.describeRows()))
+                }
             }
             at(0.1, "start") { m.h_setTitle("歌曲", artist: "歌手", album: "专辑", duration: 150, playing: true) }
             at(0.16, "same geometry refresh") { ctl.refresh() }
@@ -105,6 +111,54 @@ final class HarnessAppDelegate: UIResponder, UIApplicationDelegate {
                 sampler.invalidate()
                 precondition(clipped == 0, "clipped content in \(clipped) frames")
             }
+            return
+        }
+        if env["IK_TL"] == "morph" {
+            // 0.6.6：音乐 ↔ 通知直接变形、紧凑 ↔ 歌词时进度环跟着胶囊。逐帧检查：
+            //   胶囊始终盖住模拟的系统岛紧凑态；环和胶囊同尺寸同圆角；紧凑 ↔ 歌词期间环一直可见
+            let ctl = IKController.shared()!
+            let p = IKPrefs.shared()!
+            let sw = UIScreen.main.bounds.width
+            let sys = CGRect(x: (sw - 250.67) / 2, y: p.islandTop, width: 250.67, height: p.cutoutHeight)
+            var sampling = false, ringPhase = false
+            var frames = 0, coverFail = 0, ringFail = 0, ringFrames = 0
+            var minRing = 1.0
+            var firstCover: String?, firstRing: String?
+            let sampler = Timer.scheduledTimer(withTimeInterval: 1.0 / 120, repeats: true) { _ in
+                guard sampling else { return }
+                frames += 1
+                if let problem = HarnessHUD.coverageProblem(forSystemRect: sys) { coverFail += 1; firstCover = firstCover ?? problem }
+                if let problem = HarnessHUD.ringProblem() { ringFail += 1; firstRing = firstRing ?? problem }
+                if ringPhase { ringFrames += 1; minRing = min(minRing, HarnessHUD.ringOpacity()) }
+            }
+            at(0.2, "system compact 250.67") { HarnessHUD.setSystemFrames([NSValue(cgRect: sys)]) }
+            at(0.3, "track starts") { m.h_setTitle("晴天", artist: "周杰伦", album: "叶惠美", duration: 269, playing: true) }
+            at(1.0, "lyric") { m.h_setTitle("晴天", artist: "故事的小黄花", album: "叶惠美", duration: 269, playing: true) }
+            at(2.0, "start sampling") { sampling = true }
+            at(2.2, "notification while lyric") {
+                ctl.showNotification(withBundle: "com.tencent.xin", appName: "微信", title: "小明", message: "今晚一起吃饭吗？", avatar: nil)
+            }
+            at(4.0, "dismiss -> lyric") { ctl.perform(NSSelectorFromString("dismissNotification")) }
+            at(5.2, "tap -> compact") { ringPhase = true; ctl.perform(NSSelectorFromString("tapped")) }
+            at(6.4, "tap -> lyric") { ctl.perform(NSSelectorFromString("tapped")) }
+            at(7.4, "tap -> compact") { ctl.perform(NSSelectorFromString("tapped")) }
+            at(8.4, "notification while compact") {
+                ringPhase = false
+                ctl.showNotification(withBundle: "com.tencent.xin", appName: "微信", title: "小红", message: "收到", avatar: nil)
+            }
+            at(9.8, "dismiss -> compact") { ctl.perform(NSSelectorFromString("dismissNotification")) }
+            at(11.0, "report") {
+                sampling = false
+                sampler.invalidate()
+                self.log(String(format: "morph frames=%d coverFail=%d ringFail=%d ringFrames=%d minRingOpacity=%.2f firstCover=%@ firstRing=%@",
+                                frames, coverFail, ringFail, ringFrames, minRing, firstCover ?? "-", firstRing ?? "-"))
+            }
+            return
+        }
+        if env["IK_TL"] == "align" {
+            at(0.3, "track starts") { m.h_setTitle("晴天", artist: "周杰伦", album: "叶惠美", duration: 269, playing: true) }
+            at(1.0, "lyric") { m.h_setTitle("晴天", artist: "故事的小黄花", album: "叶惠美", duration: 269, playing: true) }
+            at(2.0, "probe") { self.log(String(format: "align firstRowCenterOffset=%.2f", HarnessHUD.firstRowCenterOffset())) }
             return
         }
         if env["IK_TL"] == "adaptive" {

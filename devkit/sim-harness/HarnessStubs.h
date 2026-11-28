@@ -21,4 +21,12 @@
 + (NSString *)describeRows;
 // 屏幕尺寸、系统私有接口给的开孔矩形、IKPrefs 最终采用的开孔
 + (NSString *)describeGeometry;
+// 按此刻正在显示的状态检查：胶囊有没有把 sys（屏幕坐标）整个盖住；进度环是不是和胶囊同尺寸、同圆角。
+// 没问题返回 nil，否则返回描述。胶囊几乎透明时不检查覆盖
++ (nullable NSString *)coverageProblemForSystemRect:(CGRect)sys;
++ (nullable NSString *)ringProblem;
+// 进度环此刻实际的不透明度（ringHolder × ringBox）
++ (double)ringOpacity;
+// 第一行文字中心相对胶囊中线的偏移（屏幕坐标），用来看“居中”和“自定义”
++ (double)firstRowCenterOffset;
 @end

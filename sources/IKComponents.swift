@@ -97,34 +97,21 @@ struct IslandPreview: View {
             case .idle:
                 Capsule().fill(Color.black).frame(width: 126, height: 37)
             case .music:
-                let size = CGFloat(s.lyricFontSize)
                 let compact = s.defaultMusicView == 1 || !s.lyric
-                let two = s.lyricLines >= 2
-                let alignment: HorizontalAlignment = s.lyricAlignment == 2 ? .trailing : (s.lyricAlignment == 1 ? .center : .leading)
-                let titleColor = s.previewColor(mode: s.titleColorMode, custom: s.titleColor)
-                let lyricColor = s.previewColor(mode: s.lyricColorMode, custom: s.lyricColor)
-                HStack(spacing: 12) {
-                    Disc(size: compact ? 27 : (two ? 54 : 38), spinning: s.spin, seconds: s.spinSeconds, accent: accent)
-                    if compact {
+                if compact {
+                    HStack(spacing: 12) {
+                        Disc(size: 27, spinning: s.spin, seconds: s.spinSeconds, accent: accent)
                         Spacer(minLength: 0)
                         Image(systemName: "waveform").foregroundColor(accent).accessibilityHidden(true)
-                    } else {
-                        VStack(alignment: alignment, spacing: 2) {
-                            if two {
-                                Text("歌名").font(.system(size: size, weight: .bold)).foregroundColor(titleColor)
-                                .lineLimit(1)
-                            }
-                            LyricSample(color: lyricColor, font: .system(size: two ? max(11, size - 3) : size,
-                                                                      weight: two ? .regular : .bold), filled: s.lyricEffect == 1)
-                        }
-                        .frame(maxWidth: .infinity, alignment: Alignment(horizontal: alignment, vertical: .center))
                     }
+                    .padding(.horizontal, 12)
+                    .frame(maxWidth: s.placement == 1 ? 240 : 88)
+                    .frame(height: 38)
+                    .background(Color.black)
+                    .clipShape(RoundedRectangle(cornerRadius: 36, style: .continuous))
+                } else {
+                    LyricCapsulePreview(s: s, accent: accent)
                 }
-                .padding(.horizontal, 12)
-                .frame(maxWidth: compact ? (s.placement == 1 ? 240 : 88) : 320)
-                .frame(height: compact ? 38 : (two ? 76 : 58))
-                .background(Color.black)
-                .clipShape(RoundedRectangle(cornerRadius: 36, style: .continuous))
             case .notif:
                 if s.notif {
                     HStack(spacing: 12) {
@@ -148,6 +135,73 @@ struct IslandPreview: View {
         }
         .frame(height: 96)
         .animation(.spring(response: 0.4, dampingFraction: 0.8), value: mode)
+    }
+}
+
+// 歌词态的预览。文字位置和岛上的算法一致：居中、自定义都以整个胶囊的中线为准，
+// 自定义再加偏移；文字只在封面右边那块区域里移动，到边就停住
+@available(iOS 16.0, *)
+struct LyricCapsulePreview: View {
+    var s: Settings
+    var accent: Color
+
+    private static let sample = "正在唱的这一句歌词"
+
+    private func width(_ text: String, size: CGFloat, weight: UIFont.Weight) -> CGFloat {
+        ceil((text as NSString).size(withAttributes: [.font: UIFont.systemFont(ofSize: size, weight: weight)]).width) + 1
+    }
+
+    var body: some View {
+        let size = CGFloat(s.lyricFontSize)
+        let two = s.lyricLines >= 2
+        let titleColor = s.previewColor(mode: s.titleColorMode, custom: s.titleColor)
+        let lyricColor = s.previewColor(mode: s.lyricColorMode, custom: s.lyricColor)
+        let lyricSize = two ? max(11, size - 3) : size
+        let lines: [(String, CGFloat, UIFont.Weight)] = two
+            ? [("歌名", size, .bold), (Self.sample, lyricSize, .regular)]
+            : [(Self.sample, lyricSize, .bold)]
+        let custom = s.lyricAlignment == 3
+        let disc: CGFloat = two ? 54 : 38
+        GeometryReader { geo in
+            let W = geo.size.width, H = geo.size.height
+            let areaX = 12 + disc + 12, areaW = max(0, W - areaX - 16)
+            let mid = W / 2 + (custom ? CGFloat(s.lyricOffsetX) : 0)
+            let lineHeight: [CGFloat] = two ? [size + 6, lyricSize + 5] : [size + 6]
+            let blockH = lineHeight.reduce(0, +)
+            let dy = custom ? max(-(H - blockH) / 2 + 3, min((H - blockH) / 2 - 3, CGFloat(s.lyricOffsetY))) : 0
+            ZStack(alignment: .topLeading) {
+                Disc(size: disc, spinning: s.spin, seconds: s.spinSeconds, accent: accent)
+                    .position(x: 12 + disc / 2, y: H / 2)
+                ForEach(lines.indices, id: \.self) { i in
+                    let line = lines[i]
+                    let tw = min(areaW, width(line.0, size: line.1, weight: line.2))
+                    let spare = areaW - tw
+                    let x: CGFloat = s.lyricAlignment == 0 ? 0
+                        : (s.lyricAlignment == 2 ? spare : max(0, min(spare, mid - areaX - tw / 2)))
+                    let y = (H - blockH) / 2 + dy + lineHeight[..<i].reduce(0, +) + lineHeight[i] / 2
+                    Group {
+                        if two && i == 0 {
+                            Text(line.0).font(.system(size: line.1, weight: .bold)).foregroundColor(titleColor).lineLimit(1)
+                        } else {
+                            LyricSample(color: lyricColor, font: .system(size: line.1, weight: two ? .regular : .bold),
+                                        filled: s.lyricEffect == 1)
+                        }
+                    }
+                    .frame(width: tw, alignment: .leading)
+                    .position(x: areaX + x + tw / 2, y: y)
+                }
+                // 胶囊中线，方便看出“居中”是对着哪里
+                if s.lyricAlignment == 1 || custom {
+                    Rectangle().fill(Color.white.opacity(0.12)).frame(width: 1, height: H - 16)
+                        .position(x: W / 2, y: H / 2)
+                }
+            }
+        }
+        .frame(maxWidth: 320)
+        .frame(height: two ? 76 : 58)
+        .background(Color.black)
+        .clipShape(RoundedRectangle(cornerRadius: 36, style: .continuous))
+        .accessibilityHidden(true)
     }
 }
 

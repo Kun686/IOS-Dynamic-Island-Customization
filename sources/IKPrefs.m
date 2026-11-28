@@ -127,7 +127,9 @@ static UIColor *IKColorFromHex(NSString *hex, UIColor *fallback) {
     self.lyricLines     = n(@"lyricLines", 2) >= 2 ? 2 : 1;
     NSNumber *alignment = d[@"lyricAlignment"];
     NSInteger value = [alignment isKindOfClass:NSNumber.class] ? alignment.integerValue : 0;
-    self.lyricAlignment = value == 1 || value == 2 ? value : 0;
+    self.lyricAlignment = value >= 1 && value <= 3 ? value : 0;
+    self.lyricOffsetX   = clamp(n(@"lyricOffsetX", 0), -120, 120);
+    self.lyricOffsetY   = clamp(n(@"lyricOffsetY", 0), -12, 12);
     self.defaultCompact = [d[@"defaultMusicView"] isEqual:@1];
     self.spinSeconds    = MAX(1.0, n(@"spinSeconds", 8));
     self.notifDuration  = MAX(1.0, n(@"notifDuration", 5));

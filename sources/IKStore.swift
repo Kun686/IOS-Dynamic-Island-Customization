@@ -24,7 +24,9 @@ struct Settings {
     var titleColor = "#FFFFFF"
     var ringColor = "#B8F34A"
     var lyricLines = 2
-    var lyricAlignment = 0
+    var lyricAlignment = 0     // 0 靠左 / 1 居中（按整个胶囊的中线）/ 2 靠右 / 3 自定义
+    var lyricOffsetX = 0.0     // 自定义：文字中心相对胶囊中线的左右偏移，正数向右
+    var lyricOffsetY = 0.0     // 自定义：上下偏移，正数向下
     var defaultMusicView = 0
     var spinSeconds = 8.0
     var notifDuration = 5.0
@@ -44,7 +46,9 @@ struct Settings {
         transitionStyle = d["transitionStyle"] as? Int ?? transitionStyle
         windowLevelBoost = d["windowLevelBoost"] as? Int ?? windowLevelBoost
         lyricLines = d["lyricLines"] as? Int ?? lyricLines
-        if let choice = d["lyricAlignment"] as? Int, (0...2).contains(choice) { lyricAlignment = choice }
+        if let choice = d["lyricAlignment"] as? Int, (0...3).contains(choice) { lyricAlignment = choice }
+        lyricOffsetX = max(-120, min(120, d["lyricOffsetX"] as? Double ?? lyricOffsetX))
+        lyricOffsetY = max(-12, min(12, d["lyricOffsetY"] as? Double ?? lyricOffsetY))
         defaultMusicView = (d["defaultMusicView"] as? Int == 1) ? 1 : 0
         placement = d["placement"] as? Int ?? placement
         coverExtraWidth = d["coverExtraWidth"] as? Double ?? coverExtraWidth
@@ -73,6 +77,7 @@ struct Settings {
             "enabled": enabled, "notif": notif, "lyric": lyric, "spin": spin,
             "pauseStops": pauseStops, "lyricLines": lyricLines,
             "lyricAlignment": lyricAlignment, "defaultMusicView": defaultMusicView,
+            "lyricOffsetX": lyricOffsetX, "lyricOffsetY": lyricOffsetY,
             "transitionStyle": transitionStyle, "windowLevelBoost": windowLevelBoost,
             "spinSeconds": spinSeconds, "notifDuration": notifDuration,
             "notifApps": notifApps, "accent": accent, "placement": placement, "progressRing": progressRing,

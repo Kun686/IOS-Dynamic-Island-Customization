@@ -571,14 +571,31 @@ static const UIViewAnimationOptions IKAnimOptions =
     self.miniHolder.alpha = 0;
 }
 
+// 覆盖模式下胶囊必须一直盖住系统岛。往小里变时如果弹簧回弹，会有一瞬间比目标还小，
+// 系统岛的边（专辑图、波形、描边）就从胶囊四周露出来；所以只要有一边在变小，就用不回弹的弹簧
+- (CGFloat)damping:(CGFloat)preferred toward:(CGRect)frame {
+    if ([IKPrefs shared].placement == 0) return preferred;
+    CALayer *shown = self.island.layer.presentationLayer ?: self.island.layer;
+    CGSize now = shown.bounds.size;
+    if (frame.size.width < now.width - 0.5 || frame.size.height < now.height - 0.5) return 1.0;
+    return preferred;
+}
+
 // Follow the visible shell while it changes size so fitted content can stay on screen.
 - (void)resizeTo:(IKState)state frame:(CGRect)frame duration:(double)duration damping:(CGFloat)damping
          velocity:(CGFloat)velocity alongside:(void (^)(void))settle {
+    [self resizeTo:state frame:frame duration:duration damping:damping velocity:velocity contentDelay:0 alongside:settle];
+}
+
+// contentDelay：新内容晚一点再淡入。音乐 ↔ 通知时让旧内容的快照先淡掉一大半，两层文字不叠在一起
+- (void)resizeTo:(IKState)state frame:(CGRect)frame duration:(double)duration damping:(CGFloat)damping
+         velocity:(CGFloat)velocity contentDelay:(double)contentDelay alongside:(void (^)(void))settle {
     NSUInteger token = ++self.transitionToken;
     IKIslandView *island = self.island;
     [island beginFollowingShell];
     island.state = state;
-    [UIView animateWithDuration:0.16 delay:0 options:IKAnimOptions animations:^{ island.contentAlpha = 1; } completion:nil];
+    [UIView animateWithDuration:(contentDelay > 0 ? 0.2 : 0.16) delay:contentDelay options:IKAnimOptions
+                     animations:^{ island.contentAlpha = 1; } completion:nil];
     [UIView animateWithDuration:duration delay:0 usingSpringWithDamping:damping initialSpringVelocity:velocity
                         options:IKAnimOptions animations:^{
         island.transform = CGAffineTransformIdentity;
@@ -591,7 +608,7 @@ static const UIViewAnimationOptions IKAnimOptions =
         if (self.transitionToken != token || self.shownState != state) return;
         [UIView performWithoutAnimation:^{
             [island endFollowingShell];
-            [island.layer removeAllAnimations];
+            [island stopShellAnimations];
             island.transform = CGAffineTransformIdentity;
             island.frame = frame;
             [island setNeedsLayout];
@@ -737,14 +754,16 @@ static const UIViewAnimationOptions IKAnimOptions =
     else if (self.demoRetracting) target = IKStateHidden;
     else if (musicOn) target = (p.lyricEnabled && !self.userCollapsed) ? IKStateLyric : IKStateMusicCompact;
 
-    // A notification replaces the previous text before the music shell retracts (and vice versa).
+    // 音乐和通知互相切换：在换文字之前给旧内容拍一张快照淡出，新内容随胶囊变形淡入
     if (target != IKStateHidden && self.shownState != IKStateHidden &&
-        ((target == IKStateNotif) != (self.shownState == IKStateNotif))) [self.island hideContentImmediately];
+        ((target == IKStateNotif) != (self.shownState == IKStateNotif))) [self.island crossfadeContent];
     // 内容
     CGRect frame = [self frameForState:target musicOn:musicOn];
     self.island.accent = p.accent;
     self.island.lyricLines = p.lyricLines;
     self.island.lyricAlignment = p.lyricAlignment;
+    self.island.lyricOffsetX = p.lyricOffsetX;
+    self.island.lyricOffsetY = p.lyricOffsetY;
     self.island.cutoutWidth = p.cutoutWidth;
     self.island.cutoutBand = CGRectGetMaxY([self cutoutRect]) - CGRectGetMinY([self coverBaseRect]);
     self.island.coversCutout = (p.placement != 0);
@@ -844,13 +863,13 @@ static const UIViewAnimationOptions IKAnimOptions =
     if (fromHidden) {
         [self appearToState:target frame:frame alongside:settleMini];
     } else if (wasNotif != isNotif) {
-        // 音乐和通知互相切换：先收起，再以新内容出现
-        [self vanishWithDuration:0.2 completion:^{
-            if (self.shownState != target) return; // 期间状态又变了，交给后一次 update
-            [self appearToState:target frame:frame alongside:settleMini];
-        }];
+        // 音乐和通知互相切换：胶囊直接变形到新尺寸，不再先缩回开孔再长出来。
+        // 以前缩回开孔的那一下，系统岛自己的音乐显示（专辑图、波形和它的描边）会整个露出来
+        [self resizeTo:target frame:frame duration:0.5 damping:[self damping:0.8 toward:frame]
+              velocity:0.2 contentDelay:0.12 alongside:settleMini];
     } else {
-        [self resizeTo:target frame:frame duration:0.45 damping:0.78 velocity:0.4 alongside:settleMini];
+        [self resizeTo:target frame:frame duration:0.45 damping:[self damping:0.78 toward:frame]
+              velocity:0.4 alongside:settleMini];
     }
 }
 

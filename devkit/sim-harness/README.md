@@ -29,8 +29,13 @@ python3 drive.py $UDID /tmp/ik scroll '{"IK_SCENARIO":"hud","IK_TL":"scroll"}' 5
 python3 drive.py $UDID /tmp/ik marquee '{"IK_SCENARIO":"hud","IK_TL":"marquee"}' 4.8 6.6 8.6
 # 长歌词唱到一半暂停再继续
 python3 drive.py $UDID /tmp/ik resume '{"IK_SCENARIO":"hud","IK_TL":"resume"}' 9.6 11.6 12.8 14.2
-# 演示连点、紧凑态和通知互相打断时，按帧检查内容边界
-python3 drive.py $UDID /tmp/ik interrupt '{"IK_SCENARIO":"hud","IK_placement":1,"IK_TL":"interrupt"}' 0.25 0.55 1.2 2.3 4.6
+# 演示连点、紧凑态和通知互相打断时，按帧检查内容边界（有切掉的帧会在日志里写 clipped at 并退出）
+python3 drive.py $UDID /tmp/ik interrupt '{"IK_SCENARIO":"hud","IK_placement":1,"IK_TL":"interrupt"}' 0.25 0.55 1.2 2.3 4.8
+# 音乐 ↔ 通知直接变形、紧凑 ↔ 歌词时进度环跟着胶囊（最后一张截图要晚于 11 秒，日志里才有 morph 那一行）：
+# coverFail 是胶囊没盖住模拟系统岛的帧数（下挂模式本来就不盖，不看这个数），ringFail 是环和胶囊尺寸、圆角对不上的帧数
+python3 drive.py $UDID /tmp/ik morph '{"IK_SCENARIO":"hud","IK_placement":1,"IK_TL":"morph"}' 2.3 2.42 4.15 5.3 6.5 8.55 11.3
+# 文字位置：日志里 firstRowCenterOffset 是第一行文字中心相对胶囊中线的偏移（居中应为 0，自定义应约等于 lyricOffsetX）
+python3 drive.py $UDID /tmp/ik align '{"IK_SCENARIO":"hud","IK_placement":1,"IK_TL":"align","IK_lyricAlignment":1}' 2.2
 # 设置页
 python3 drive.py $UDID /tmp/ik lyric '{"IK_SCENARIO":"lyric","IK_titleColorMode":2,"IK_titleColor":"#4AC8F3"}'
 python3 drive.py $UDID /tmp/ik appearance '{"IK_SCENARIO":"appearance","IK_placement":1}'
@@ -40,7 +45,11 @@ xcrun swiftc -O contact.swift -o /tmp/ik/contact && /tmp/ik/contact /tmp/ik/shee
 ```
 
 `IK_` 开头的环境变量会覆盖对应的配置项（`placement`、`transitionStyle`、`lyricLines`、`lyricEffect`、
-`titleColorMode`、`lyricColorMode`、`coverExtraWidth`、`coverExtraHeight`、`coverOffsetY`、`coverCompactSide`、`calibrateUntil`、`titleColor`）。
+`titleColorMode`、`lyricColorMode`、`coverExtraWidth`、`coverExtraHeight`、`coverOffsetY`、`coverCompactSide`、`calibrateUntil`、`titleColor`、
+`lyricAlignment`、`lyricOffsetX`、`lyricOffsetY`）。
+
+不想把模拟器建在用户目录里时，用 `xcrun simctl --set <目录> create …` 在工程的 `.build/` 下建设备，并设置 `IK_SIM_SET=<目录>`，`drive.py` 会带上 `--set`。
+`drive.py` 的日志是追加写入的，重跑前换一个输出目录。
 每次启动时日志里有一行 `geometry`：屏幕尺寸、系统私有接口给的开孔矩形、最终采用的开孔。
 
 对比旧版本的行为（例如 0.5.0 里暂停后胶囊收起却不隐藏）：
